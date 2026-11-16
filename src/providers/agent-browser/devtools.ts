@@ -224,6 +224,7 @@ export async function openDevtools(url: string, targetId: string, signal?: Abort
     })) as {
       sessionId: string;
     });
+    await send('Emulation.setFocusEmulationEnabled', { enabled: true }, page).catch(() => {});
     void follow(page);
     while (following.size) {
       const batch = [...following];

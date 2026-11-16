@@ -954,6 +954,7 @@ export function createAgentBrowserComputer(options: {
         try {
           if (!state.socket && viewport)
             await command(state, { action: 'navigate', url: 'about:blank' }, { signal });
+          if (attach && state.socket) await foreground(state, signal);
           await command(state, { action: 'navigate', url: url.href }, { signal }).catch((error) => {
             if (
               !attach ||
@@ -1473,6 +1474,16 @@ export function createAgentBrowserComputer(options: {
     } finally {
       devtools?.close();
     }
+  }
+
+  async function foreground(state: BrowserState, signal?: AbortSignal) {
+    try {
+      const tab = z
+        .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
+        .parse((await command(state, { action: 'tab_list' }, { signal })).tabs)
+        .find((item) => item.active);
+      if (tab) await fetch(`http://127.0.0.1:${attach}/json/activate/${tab.targetId}`, { signal });
+    } catch {}
   }
 
   async function inspector(state: BrowserState, signal?: AbortSignal) {
