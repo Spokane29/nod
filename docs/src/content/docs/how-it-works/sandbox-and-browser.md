@@ -132,39 +132,39 @@ Set `NOD_BROWSER_CDP` to the debugging port of a Chromium-based browser already 
 This loosens the rule that only the owner's chat starts work, for exactly one fixed action. Keep it out of any upstream pull request unless that is flagged.
 :::
 
-Another program on the same computer can ask the desktop app to sign in to one allow-listed portal, with no person and no chat. It is off unless you turn it on.
+Another program on the same computer can ask the desktop app to sign in to one pre-approved portal, with no person and no chat. It is off unless you turn it on.
 
-- **Setting.** Set `NOD_SIGNIN_INBOX` to an absolute folder path, or put the path on one line in a `signin-inbox` file in the app's data folder. Without either, nothing is watched. The setting is read when the app starts and applies to a local engine only.
-- **Allow-list.** A file you own, `nod-signin-allow.json`, sits next to the inbox folder. Without a readable one, the inbox does nothing and leaves its files untouched. Nod reads it again on every pass.
-- **Request.** A file of at most 2 KB, directly in the inbox folder, named like `cruisingpower.json`: `{ "site": "cruisingpower", "url": "https://secure.cruisingpower.com/", "requestedAt": "..." }`. Only `site` and `url` are read. Symlinks, folders, other file names and larger files are ignored.
-- **Checks.** `site` must match `^[a-z0-9-]{2,32}$` and be in the allow-list. `url` must parse, use HTTPS, carry no credentials and have an origin listed for that site. Nod passes the URL without its query and fragment, unless the allow-list pins that exact start URL in `startUrls`. The path may use only letters, digits and `._~/-`, up to 120 characters. Set `"pinnedOnly": true` on a site to accept only its pinned URLs. A refused file moves to `rejected/` with a one-line reason file.
-- **Limits.** One accepted request per site every 10 minutes and 12 an hour in total. While a reply in your chat or a task is running, a request waits, and after 15 minutes it is rejected.
-- **What Nod does.** The desktop app posts one owner message to its own engine through the same authenticated channel as the chat, with this fixed text. Only the site key and the validated URL are filled in; no other text from the request file is used:
+- **Setting.** Set `NOD_SIGNIN_INBOX` to an absolute folder path, or put the path on one line in a `signin-inbox` file in the app's data folder. Without either, nothing is read, shown or watched. The setting is read once at app start and applies to a local engine only.
+- **Inbox folder.** It is outside Nod's data. The app refuses to start the inbox when the folder is a symlink, is under `~/Downloads`, `~/Desktop` or `~/Library/Mobile Documents`, or sits in a Documents folder that iCloud syncs. The reason goes to Nod's diagnostics log. A folder such as `~/nod-signin-inbox` works.
+- **Allow-list.** `signin-allow.json` in the app's data folder, one start URL per site: `{ "sites": { "cruisingpower": { "url": "https://secure.cruisingpower.com/" } } }`. A site key matches `^[a-z0-9]{2,20}$`. A URL must be the exact canonical form of an HTTPS address of at most 100 characters, with no credentials, port, query or fragment, a host of `[a-z0-9.-]` labels and a path of at most four plain segments. No label or segment may hold more than two hyphens. Entries that fail are dropped when the list loads.
+- **Approval.** The list is read once at app start, with `signin-allow.approved` beside it holding the SHA-256 of the approved content. When the content differs from that hash (first use or any edit), the inbox stays off and the app shows one native dialog, "Allow sign-in requests?", listing each site key and its exact URL, with **Allow** and **Keep off** (default). Only **Allow** records the new hash.
+- **Request.** A file of at most 2 KB, directly in the inbox folder, named like `cruisingpower.json`: `{ "site": "cruisingpower" }`. Only `site` is read. A URL or any other text in the file is ignored. Symlinks, folders, files with more than one link, files over 2 KB and files carrying the macOS quarantine attribute move to `rejected/` with a one-line reason file. Other names are left alone.
+- **What Nod does.** The desktop app calls its own engine's `POST /api/desktop/signin` with only the approved URL, through the desktop token and nothing else. The engine builds this fixed owner message, with the approved URL and no other text from outside:
 
-  > Open `<url>` in the browser. If the page shows a sign-in form, sign in with the saved Vault login for this site (`<site>`). Leave the tab open. Do not do anything else on the site: no search, no booking, no hold, no payment, no settings, no agreement. If the site asks for a code, a CAPTCHA or new terms, stop and report it.
+  > Open `<url>` in the browser. If the page shows a sign-in form, sign in with the saved Vault login for this site. Leave the tab open. Do not do anything else on the site: no search, no booking, no hold, no payment, no settings, no agreement. If the site asks for a code, a CAPTCHA or new terms, stop and report it.
 
-  It appears in your chat like a message you typed. The [trust check](/trust/approvals/) judges it like any owner message: the checker is a model, and a Vault sign-in can still ask for approval.
+  The message appears in your chat like one you typed, in a turn whose source id starts with `inbox:`. The [trust check](/trust/approvals/) judges it like any owner message: the checker is a model, and a Vault sign-in can still ask for approval. That message counts as owner words only for its own turn. It stays out of the recent-messages list the checker uses for other actions, out of background memory learning and out of the spending check-in boundary.
 
-- **Result.** An accepted file moves to `accepted/<site>-<time>.json` with the thread and message ids added. The requesting program watches the browser itself. Every decision is one line in `log.txt` in the inbox folder: time (Pacific), site, decision and a fixed reason, with no URL and no file contents.
+- **Busy gate.** The engine refuses with a busy answer, and the request waits, while a reply in your chat or a task is queued or running, or anything waits for you: an approval, a question, a code, a browser handoff or a spending check-in. The engine checks again inside the transaction that stores the message, and the desktop app checks again right before the call. A request that waits is rejected 15 minutes after the app first saw the file.
+- **Limits.** One accepted request per site every 10 minutes, 12 an hour, 6 per site and 24 in total per 24 hours. The counts persist in `signin-state.json` in the data folder. A missing or unreadable state file holds every request for 10 minutes. After a request the app reads the turn's outcome from the engine. A sign-in counts as confirmed when the turn succeeded and the sign-in form was submitted, or no password was typed. After 2 requests in a row that were not confirmed, a site stops until you drop an empty `<site>.reset` file in the inbox folder.
+- **Result.** An accepted request moves to `accepted/<site>-<time>.json` unchanged, with a new `accepted/<site>-<time>.result.json` holding the thread, message and turn ids. `accepted/` keeps the newest 400 files and `rejected/` 400. `accepted-log.txt` keeps one line per accepted request and is never rotated. `log.txt` has one line per other decision, with time (Pacific), site and a fixed reason, and rotates at 1 MB. Neither holds a URL or file contents. The requesting program watches the browser itself.
 
-Example `nod-signin-allow.json`:
+Example `signin-allow.json`:
 
 ```json
 {
   "sites": {
-    "cruisingpower": {
-      "origins": ["https://secure.cruisingpower.com", "https://www.cruisingpower.com"]
-    },
-    "ncl": { "origins": ["https://norwegiancentral.ncl.com", "https://sso.ncl.com"] },
-    "onesource": { "origins": ["https://www.onesourcecruises.com"] },
-    "disney": { "origins": ["https://www.disneytravelagents.com"] },
-    "virgin": { "origins": ["https://www.firstmates.com"] },
-    "pleasant": { "origins": ["https://www.pleasantadvisor.com"] }
+    "cruisingpower": { "url": "https://secure.cruisingpower.com/" },
+    "ncl": { "url": "https://norwegiancentral.ncl.com/" },
+    "onesource": { "url": "https://www.onesourcecruises.com/" },
+    "disney": { "url": "https://www.disneytravelagents.com/" },
+    "virgin": { "url": "https://www.firstmates.com/" },
+    "pleasant": { "url": "https://www.pleasantadvisor.com/" }
   }
 }
 ```
 
-Code: `desktop/main/signin-inbox.mjs`, started from `desktop/main/main.mjs`.
+Code: `desktop/main/signin-inbox.mjs` (started from `desktop/main/main.mjs`) and `src/server/signin-request.ts`.
 
 ## Browser handoff
 

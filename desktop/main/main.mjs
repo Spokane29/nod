@@ -51,7 +51,7 @@ import { startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
 import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
-import { signinInboxPath, startSigninInbox } from './signin-inbox.mjs';
+import { prepareSigninInbox, startSigninInbox } from './signin-inbox.mjs';
 
 trustSystemCertificates();
 
@@ -519,22 +519,43 @@ async function engineIdle() {
     return false;
   const response = await engineRequest('/api/desktop/status');
   if (!response.ok) return false;
-  const { running } = await response.json();
-  return Array.isArray(running) && !running.some((turn) => turn?.visible || turn?.task);
+  return (await response.json()).busy === false;
+}
+
+async function signinOutcome(turnId) {
+  const response = await engineRequest(`/api/desktop/signin/${encodeURIComponent(turnId)}`);
+  return response.ok ? response.json() : undefined;
 }
 
 async function startSigninInboxFromSettings() {
   stopSigninInbox?.();
   stopSigninInbox = undefined;
-  const inbox = signinInboxPath(
-    process.env.NOD_SIGNIN_INBOX,
-    await readFile(join(app.getPath('userData'), 'signin-inbox'), 'utf8').catch(() => ''),
-  );
-  if (!inbox || quitting) return;
+  const dataDir = app.getPath('userData');
+  const prepared = await prepareSigninInbox({
+    environment: process.env.NOD_SIGNIN_INBOX,
+    setting: await readFile(join(dataDir, 'signin-inbox'), 'utf8').catch(() => ''),
+    dataDir,
+    showDialog: async ({ title, detail, buttons, defaultId, cancelId }) =>
+      (
+        await dialog.showMessageBox({
+          type: 'question',
+          title,
+          message: title,
+          detail,
+          buttons,
+          defaultId,
+          cancelId,
+          noLink: true,
+        })
+      ).response,
+    diagnostic: (line) => void writeDiagnostic(line).catch(() => {}),
+  });
+  if (!prepared || quitting) return;
   stopSigninInbox = startSigninInbox({
-    inbox,
+    ...prepared,
     request: (path, options) => engineRequest(path, options),
     isIdle: engineIdle,
+    outcome: signinOutcome,
   }).stop;
 }
 

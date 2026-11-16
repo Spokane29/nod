@@ -21,7 +21,8 @@ const utc = (column: string) =>
   `to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 const ownerText = `SELECT m.id,m.text,${utc('m.created_at')} AS at,(SELECT time_zone FROM preferences p WHERE p.owner_id=m.owner_id) AS zone FROM messages m
-  WHERE m.owner_id=$1 AND m.role='user' AND m.approval_answer IS NULL AND length(m.text)<=4000 AND NOT EXISTS (
+  WHERE m.owner_id=$1 AND m.role='user' AND m.approval_answer IS NULL AND length(m.text)<=4000
+    AND NOT EXISTS (SELECT 1 FROM turns inbox WHERE inbox.owner_id=m.owner_id AND inbox.message_id=m.id AND starts_with(inbox.source_id,'inbox:')) AND NOT EXISTS (
     SELECT 1 FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task
     WHERE offer.owner_id=m.owner_id AND offer.thread_id=m.thread_id AND task->>'title'=m.text)`;
 type OwnerText = { id: string; text: string; at: string; zone: string | null };

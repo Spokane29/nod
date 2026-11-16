@@ -57,6 +57,7 @@ import type {
   Turn,
 } from '../shared/contracts.ts';
 import type { createChatVerification } from './chat-verification.ts';
+import { ownerBusy, registerSigninRequests } from './signin-request.ts';
 import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
@@ -316,15 +317,23 @@ export async function createApp(dependencies: AppDependencies = {}) {
     await pool.query('SELECT 1');
     return { ok: true };
   });
-  if (desktopAccess)
+  if (desktopAccess) {
     app.get('/api/desktop/status', async () => {
       const result = await pool.query<{ source: string; visible: boolean; task: boolean }>(
         `SELECT u.source,${ownerStarted()} AS visible,to_jsonb(u)->>'task_id' IS NOT NULL AS task
          FROM turns u WHERE u.owner_id=$1 AND u.status='running'`,
         [ownerId],
       );
-      return { running: result.rows };
+      return { running: result.rows, busy: await ownerBusy(pool, ownerId) };
     });
+    registerSigninRequests(app, {
+      pool,
+      ownerId,
+      ready: () => publicConfiguration().llmReady,
+      submit: (text, attachments, input) =>
+        (dependencies.submitMessage ?? submitUserMessage)(text, attachments, input),
+    });
+  }
   const turnFields = `u.id,u.status,u.source,u.error,u.created_at AS "createdAt",u.finished_at AS "finishedAt",
     CASE WHEN ${activeHandoffSql}
       THEN (SELECT m.id FROM messages m WHERE m.turn_id=u.id AND m.owner_id=u.owner_id AND m.role='assistant' ORDER BY m.created_at DESC,m.id DESC LIMIT 1) END AS "handoffMessageId"`;

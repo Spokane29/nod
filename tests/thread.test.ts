@@ -10601,7 +10601,7 @@ const memoryFixture = async (tables: string[] = []) => {
   url.searchParams.set('options', `-c search_path=${schema}`);
   const pool = new pg.Pool({ connectionString: url.href });
   await pool.query(
-    "CREATE TABLE threads (id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz); CREATE TABLE messages (id uuid PRIMARY KEY, owner_id text NOT NULL, role text NOT NULL, text text NOT NULL, turn_id uuid, thread_id uuid, suggestions jsonb, approval_answer boolean, attachments jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()); CREATE TABLE turns (id uuid PRIMARY KEY, owner_id text NOT NULL, channel text, message_id uuid, withdrawn boolean NOT NULL DEFAULT false); CREATE TABLE preferences (owner_id text PRIMARY KEY, time_zone text)",
+    "CREATE TABLE threads (id uuid PRIMARY KEY, owner_id text NOT NULL, archived_at timestamptz); CREATE TABLE messages (id uuid PRIMARY KEY, owner_id text NOT NULL, role text NOT NULL, text text NOT NULL, turn_id uuid, thread_id uuid, suggestions jsonb, approval_answer boolean, attachments jsonb NOT NULL DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()); CREATE TABLE turns (id uuid PRIMARY KEY, owner_id text NOT NULL, channel text, message_id uuid, source_id text, withdrawn boolean NOT NULL DEFAULT false); CREATE TABLE preferences (owner_id text PRIMARY KEY, time_zone text)",
   );
   for (const table of tables) await pool.query(table);
   const ownerId = 'memory-fixture-owner';
@@ -10870,6 +10870,43 @@ test(
       assert.equal(calls.length, 1);
     } finally {
       release({ ops: [] });
+      await close();
+    }
+  },
+);
+
+test(
+  'background learning skips messages that started a sign-in inbox request',
+  { skip: !process.env.TEST_DATABASE_URL, timeout: 30_000 },
+  async (t) => {
+    t.mock.method(console, 'error', () => {});
+    const { pool, ownerId, post, memory, close } = await memoryFixture([approvalsTable]);
+    try {
+      const { calls, state, curator } = scriptedCurator();
+      const learning = createMemoryLearning({ pool, ownerId, memory, curator });
+      assert.equal(await learning.reflect(), 0);
+      await memory.edit((tree) => {
+        tree.reflected = nilMark;
+      });
+      const kept = 'I always want meeting notes as bullet points.';
+      await post(kept, { at: '2026-01-01T10:00:00Z' });
+      const inbox = await post('Open https://secure.example.com/ in the browser.', {
+        at: '2026-01-01T10:01:00Z',
+      });
+      await pool.query(
+        "INSERT INTO turns(id,owner_id,message_id,source_id) VALUES($1,$2,$3,'inbox:fixture')",
+        [randomUUID(), ownerId, inbox.id],
+      );
+      state.answer = () => ({ ops: [] });
+      await learning.reflect();
+      assert.equal(calls.length, 1);
+      assert.deepEqual(
+        (calls[0].input as { messages: { text: string }[] }).messages.map(
+          (message) => message.text,
+        ),
+        [kept],
+      );
+    } finally {
       await close();
     }
   },

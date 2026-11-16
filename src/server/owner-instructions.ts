@@ -226,7 +226,9 @@ export async function captureOwnerInstructions(
                SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.message_id=messages.id OR u.id=messages.turn_id)
                  AND to_jsonb(u)->>'task_id'=$4::text) OR (NOT EXISTS (
                SELECT 1 FROM turns r WHERE r.owner_id=$1 AND r.message_id=messages.id
-                 AND r.source_id LIKE 'reaction-reply:%')))
+                 AND r.source_id LIKE 'reaction-reply:%') AND NOT EXISTS (
+               SELECT 1 FROM turns i WHERE i.owner_id=$1 AND i.message_id=messages.id
+                 AND starts_with(i.source_id,'inbox:'))))
              AND approval_answer IS NULL AND NOT ${withdrawnSql('messages')}
              AND (created_at>CASE WHEN $4::uuid IS NULL THEN $5 ELSE LEAST($5,(SELECT created_at - interval '24 hours' FROM tasks WHERE id=$4::uuid AND owner_id=$1)) END OR id=ANY($3::uuid[])) AND text NOT IN (
              SELECT task->>'title' FROM messages offer, jsonb_array_elements(offer.suggestions->'tasks') task

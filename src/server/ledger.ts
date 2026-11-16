@@ -756,6 +756,7 @@ export function createLedger({
         `WITH boundary AS (
            SELECT t.id,t.created_at FROM turns t JOIN turns c ON c.id=$3 AND c.owner_id=$1
              WHERE t.owner_id=$1 AND t.session_id=$2 AND t.source IN ('user','task')
+               AND NOT starts_with(COALESCE(t.source_id,''),'inbox:')
                AND (t.created_at,t.id)<=(c.created_at,c.id)
            ORDER BY t.created_at DESC,t.id DESC LIMIT 1
          ) SELECT COALESCE(sum(COALESCE(cost_usd,(details->>'estimateUsd')::float8)),0)::float8 AS spent,
