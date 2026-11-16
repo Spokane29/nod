@@ -74,7 +74,7 @@ import { createWhatsAppLinkedTransport } from '../providers/chat-sdk/whatsapp.ts
 import { combineMessagingTransports } from '../providers/chat-sdk/combined.ts';
 import { createChatSdkSetupVerifier } from '../providers/chat-sdk/settings.ts';
 import { createContainerBrowserComputer } from '../providers/container-browser/index.ts';
-import { createHostBrowserComputer } from '../providers/host-browser/index.ts';
+import { createHostBrowserComputer, hostBrowserName } from '../providers/host-browser/index.ts';
 import {
   createOnePassword,
   desktopOnePassword,
@@ -309,6 +309,10 @@ export function modelEnvironment(
     },
   };
 }
+
+const hostBrowser = process.env.NOD_BROWSER_EXECUTABLE
+  ? hostBrowserName(process.env.NOD_BROWSER_EXECUTABLE)
+  : undefined;
 
 export function createDefaultAdapters(
   env: Record<string, string | undefined> = process.env,
@@ -2146,7 +2150,11 @@ async function initializeApplication(
             context.turnId,
             () =>
               runtime
-                .runTurn({ ...context, runtimeHost: desktopMode ? 'desktop' : 'server' })
+                .runTurn({
+                  ...context,
+                  runtimeHost: desktopMode ? 'desktop' : 'server',
+                  hostBrowser,
+                })
                 .finally(() => proactivity.release(context.turnId)),
             Boolean(context.spendingLimitReached),
             Boolean(context.automatic),

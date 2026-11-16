@@ -72,12 +72,18 @@ export function compactSystemPrompt(
   return systemPrompt(workspace, skills, task, background, true);
 }
 
-function channelAvailability(context: RuntimeContext) {
+function hostAvailability(context: RuntimeContext) {
   if (context.runtimeHost === 'desktop')
     return 'Runtime availability: This assistant runs inside the local desktop app. Telegram and WhatsApp can reply only while Nod is running on an awake, online computer and the channel is connected. Closing the window keeps Nod running; quitting the app or sleeping the computer stops live replies. Messages sent while stopped may be delivered after Nod restarts, but do not promise that they will be processed; ask the owner to resend if no reply appears after reconnecting.';
   if (context.runtimeHost === 'server')
     return 'Runtime availability: This assistant runs in a server process separate from a web or desktop client. Closing a client does not stop the server. Telegram and WhatsApp can reply while the server is running, online, and the channel is connected. Do not assume cloud hosting or continuous uptime.';
   return '';
+}
+
+function channelAvailability(context: RuntimeContext) {
+  const host = hostAvailability(context);
+  if (!context.hostBrowser) return host;
+  return `${host}${host ? '\n' : ''}Browser: Your browser tool drives ${context.hostBrowser} on the owner's own computer, in windows Nod opens with its own profiles and sign-ins. It is not a Linux browser. When the owner asks you to use Chrome or their browser, use your browser tool and say it is ${context.hostBrowser}; never answer that you cannot control Chrome. It does not see the tabs or sign-ins of the browser windows the owner opened themselves.`;
 }
 
 function credentialStatusBlock(context: RuntimeContext) {

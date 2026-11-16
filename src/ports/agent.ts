@@ -125,6 +125,7 @@ export interface RuntimeContext {
   model?: ModelSelection;
   channel?: string;
   runtimeHost?: 'desktop' | 'server';
+  hostBrowser?: string;
   timeZone?: string;
   locale?: string;
   hourCycle?: 'auto' | 'h12' | 'h23';

@@ -1,6 +1,6 @@
 import { accessSync, constants } from 'node:fs';
 import { createRequire } from 'node:module';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Computer } from '../../ports/computer.ts';
 import { createAgentBrowserComputer } from '../agent-browser/index.ts';
 
@@ -19,6 +19,10 @@ export function hostBrowserDriver(
     'bin',
     `agent-browser-${platform}-${architecture}${platform === 'win32' ? '.exe' : ''}`,
   );
+}
+
+export function hostBrowserName(browserExecutable: string) {
+  return basename(browserExecutable.trim()).replace(/\.exe$/i, '');
 }
 
 export function createHostBrowserComputer(options: {
