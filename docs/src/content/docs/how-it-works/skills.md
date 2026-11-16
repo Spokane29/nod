@@ -30,7 +30,7 @@ The connected apps, schedules and watches, artifacts, and video links guides use
 
 ## The task guides
 
-The library has 27 task guides in [`src/runtime/skills`](https://github.com/n8n-io/nod/tree/main/src/runtime/skills).
+The library has 28 task guides in [`src/runtime/skills`](https://github.com/n8n-io/nod/tree/main/src/runtime/skills).
 
 | Home and life             | Work                    | Mail, files and research |
 | ------------------------- | ----------------------- | ------------------------ |
@@ -42,7 +42,7 @@ The library has 27 task guides in [`src/runtime/skills`](https://github.com/n8n-
 | `learning-and-study`      | `sales-and-crm`         | `research`               |
 | `personal-finance`        | `software-and-websites` | `writing-and-content`    |
 | `privacy-and-accounts`    | `n8n`                   | `visual-replies`         |
-| `shopping`                |                         |                          |
+| `shopping`                | `web-browsing`          |                          |
 | `subscriptions-and-bills` |                         |                          |
 | `travel`                  |                         |                          |
 
