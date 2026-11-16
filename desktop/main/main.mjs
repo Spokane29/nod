@@ -51,6 +51,7 @@ import { startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
 import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
+import { signinInboxPath, startSigninInbox } from './signin-inbox.mjs';
 
 trustSystemCertificates();
 
@@ -187,6 +188,7 @@ let connectionReturnsToOnboarding = false;
 let clientPartition = 'persist:nod-app';
 let replayingProductOnboarding = process.argv.includes('--onboarding');
 let stopNotifications;
+let stopSigninInbox;
 let unreadBadge;
 let preferences = { theme: 'system', notifications: false, launchAtLogin: false };
 const displayedNotifications = new Set();
@@ -503,6 +505,37 @@ function trackZoomFactor(window) {
         (error) => void writeDiagnostic(error.message).catch(() => {}),
       );
     });
+}
+
+async function engineIdle() {
+  if (
+    remoteConnection ||
+    !engine ||
+    !engineBound ||
+    !enginePreferencesReady ||
+    closingEngine ||
+    quitting
+  )
+    return false;
+  const response = await engineRequest('/api/desktop/status');
+  if (!response.ok) return false;
+  const { running } = await response.json();
+  return Array.isArray(running) && !running.some((turn) => turn?.visible || turn?.task);
+}
+
+async function startSigninInboxFromSettings() {
+  stopSigninInbox?.();
+  stopSigninInbox = undefined;
+  const inbox = signinInboxPath(
+    process.env.NOD_SIGNIN_INBOX,
+    await readFile(join(app.getPath('userData'), 'signin-inbox'), 'utf8').catch(() => ''),
+  );
+  if (!inbox || quitting) return;
+  stopSigninInbox = startSigninInbox({
+    inbox,
+    request: (path, options) => engineRequest(path, options),
+    isIdle: engineIdle,
+  }).stop;
 }
 
 function synchronizeNotifications() {
@@ -2125,6 +2158,8 @@ async function quit(complete, failure = 'Nod could not finish shutting down.') {
     (error) => void writeDiagnostic(error.message).catch(() => {}),
   );
   await zoomPersistence;
+  stopSigninInbox?.();
+  stopSigninInbox = undefined;
   stopUpdateChecks?.();
   const stoppingUpdates = updates?.dispose();
   updateReadinessNotice();
@@ -2939,6 +2974,10 @@ else {
         welcomePassed = saved.onboardingPreferenceStep === 'complete';
         update({ remote: Boolean(saved.serverUrl) });
         applyPreferences(saved);
+        if (!saved.serverUrl)
+          void startSigninInboxFromSettings().catch(
+            (error) => void writeDiagnostic(bounded(error.message)).catch(() => {}),
+          );
         guidedStartup = !saved.serverUrl && saved.onboardingPreferenceStep !== 'complete';
         const presented = showSettings('general', true);
         if (saved.serverUrl || saved.onboardingPreferenceStep === 'complete' || saved.welcome)

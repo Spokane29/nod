@@ -126,6 +126,46 @@ Set `NOD_BROWSER_CDP` to the debugging port of a Chromium-based browser already 
 - The public-addresses-only proxy and the passkey block don't apply. Nod still refuses to open a private address itself, but a page can link to one.
 - The trust check, Vault and known-secret masking work the same way.
 
+### Sign-in inbox
+
+:::caution[Fork-only]
+This loosens the rule that only the owner's chat starts work, for exactly one fixed action. Keep it out of any upstream pull request unless that is flagged.
+:::
+
+Another program on the same computer can ask the desktop app to sign in to one allow-listed portal, with no person and no chat. It is off unless you turn it on.
+
+- **Setting.** Set `NOD_SIGNIN_INBOX` to an absolute folder path, or put the path on one line in a `signin-inbox` file in the app's data folder. Without either, nothing is watched. The setting is read when the app starts and applies to a local engine only.
+- **Allow-list.** A file you own, `nod-signin-allow.json`, sits next to the inbox folder. Without a readable one, the inbox does nothing and leaves its files untouched. Nod reads it again on every pass.
+- **Request.** A file of at most 2 KB, directly in the inbox folder, named like `cruisingpower.json`: `{ "site": "cruisingpower", "url": "https://secure.cruisingpower.com/", "requestedAt": "..." }`. Only `site` and `url` are read. Symlinks, folders, other file names and larger files are ignored.
+- **Checks.** `site` must match `^[a-z0-9-]{2,32}$` and be in the allow-list. `url` must parse, use HTTPS, carry no credentials and have an origin listed for that site. Nod passes the URL without its query and fragment, unless the allow-list pins that exact start URL in `startUrls`. The path may use only letters, digits and `._~/-`, up to 120 characters. Set `"pinnedOnly": true` on a site to accept only its pinned URLs. A refused file moves to `rejected/` with a one-line reason file.
+- **Limits.** One accepted request per site every 10 minutes and 12 an hour in total. While a reply in your chat or a task is running, a request waits, and after 15 minutes it is rejected.
+- **What Nod does.** The desktop app posts one owner message to its own engine through the same authenticated channel as the chat, with this fixed text. Only the site key and the validated URL are filled in; no other text from the request file is used:
+
+  > Open `<url>` in the browser. If the page shows a sign-in form, sign in with the saved Vault login for this site (`<site>`). Leave the tab open. Do not do anything else on the site: no search, no booking, no hold, no payment, no settings, no agreement. If the site asks for a code, a CAPTCHA or new terms, stop and report it.
+
+  It appears in your chat like a message you typed. The [trust check](/trust/approvals/) judges it like any owner message: the checker is a model, and a Vault sign-in can still ask for approval.
+
+- **Result.** An accepted file moves to `accepted/<site>-<time>.json` with the thread and message ids added. The requesting program watches the browser itself. Every decision is one line in `log.txt` in the inbox folder: time (Pacific), site, decision and a fixed reason, with no URL and no file contents.
+
+Example `nod-signin-allow.json`:
+
+```json
+{
+  "sites": {
+    "cruisingpower": {
+      "origins": ["https://secure.cruisingpower.com", "https://www.cruisingpower.com"]
+    },
+    "ncl": { "origins": ["https://norwegiancentral.ncl.com", "https://sso.ncl.com"] },
+    "onesource": { "origins": ["https://www.onesourcecruises.com"] },
+    "disney": { "origins": ["https://www.disneytravelagents.com"] },
+    "virgin": { "origins": ["https://www.firstmates.com"] },
+    "pleasant": { "origins": ["https://www.pleasantadvisor.com"] }
+  }
+}
+```
+
+Code: `desktop/main/signin-inbox.mjs`, started from `desktop/main/main.mjs`.
+
 ## Browser handoff
 
 When Pi needs you in the browser, it calls `browser` with `action: handoff` and a clear instruction. Nod web shows the live tab in chat.
