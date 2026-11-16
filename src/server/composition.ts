@@ -74,6 +74,7 @@ import { createWhatsAppLinkedTransport } from '../providers/chat-sdk/whatsapp.ts
 import { combineMessagingTransports } from '../providers/chat-sdk/combined.ts';
 import { createChatSdkSetupVerifier } from '../providers/chat-sdk/settings.ts';
 import { createContainerBrowserComputer } from '../providers/container-browser/index.ts';
+import { createHostBrowserComputer } from '../providers/host-browser/index.ts';
 import {
   createOnePassword,
   desktopOnePassword,
@@ -496,7 +497,9 @@ export function createDefaultAdapters(
       configRoot: join(dataRoot, 'pi'),
       traces,
     }),
-    computer: createContainerBrowserComputer({ dataRoot, container: env.BROWSER_CONTAINER }),
+    computer: env.NOD_BROWSER_EXECUTABLE
+      ? createHostBrowserComputer({ dataRoot, browserExecutable: env.NOD_BROWSER_EXECUTABLE })
+      : createContainerBrowserComputer({ dataRoot, container: env.BROWSER_CONTAINER }),
     passwordManager: createOnePassword({
       open: desktopMode ? desktopOnePassword() : forkedOnePassword(env.NOD_APP_VERSION || 'source'),
     }),

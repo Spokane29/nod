@@ -1163,6 +1163,7 @@ function baseEnvironment() {
       'NOD_TRACES_TOKEN',
       'NOD_ONBOARDING_EMAIL_URL',
       'OTEL_EXPORTER_OTLP_ENDPOINT',
+      'NOD_BROWSER_EXECUTABLE',
     ]
       .filter((key) => typeof process.env[key] === 'string')
       .map((key) => [key, process.env[key]]),

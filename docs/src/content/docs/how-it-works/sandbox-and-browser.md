@@ -103,6 +103,20 @@ Every browser command has a deadline: 60 seconds, or a wait's own timeout plus 3
 
 Known secret values (passwords, codes, card numbers and security codes) are removed from tool output and masked in screenshots; usernames and the cardholder name aren't secrets and stay visible. URL parameters that carry credentials, such as tokens and signatures, are hidden; other query parameters stay. When an action fails, Pi sees the browser's own error with known secrets removed. Pi uses saved profiles through `browser_session` and never reads their files. The code is in [`src/providers/agent-browser/`](https://github.com/n8n-io/nod/tree/main/src/providers/agent-browser).
 
+## A browser on your own computer
+
+Set `NOD_BROWSER_EXECUTABLE` to the full path of a Chromium-based browser, such as Google Chrome Beta, to make Nod use that browser on the host in place of the browser container. For example, on a Mac:
+
+```sh
+NOD_BROWSER_EXECUTABLE="/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta"
+```
+
+- Nod starts its own copies of that browser, one per session, with its own profiles under `NOD_DATA_ROOT/host-browser`. It doesn't use your everyday profile or its sign-ins, and it runs next to a copy you already have open.
+- The trust check, Vault, known-secret masking, the passkey block and the public-addresses-only proxy work the same way.
+- The windows open on your desktop, minimized on a Mac. The browser keeps its own sandbox on.
+- The container boundary is gone: the browser runs as your user on your computer. Use this only on a computer you trust Nod to browse from.
+- The desktop app reads the variable from the environment it was started with.
+
 ## Browser handoff
 
 When Pi needs you in the browser, it calls `browser` with `action: handoff` and a clear instruction. Nod web shows the live tab in chat.
