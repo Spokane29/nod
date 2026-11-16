@@ -205,7 +205,13 @@ import type { VaultActivityReason } from '../shared/contracts.ts';
 import { createTriage, getPreferences } from './triage.ts';
 import { createTasks } from './tasks.ts';
 import { createActivity } from './activity.ts';
-import { checkedKeyStore, createVault, credentialOrigin, sealedDataExists } from './vault.ts';
+import {
+  checkedKeyStore,
+  createVault,
+  credentialOrigin,
+  sealedDataExists,
+  siteOrigins,
+} from './vault.ts';
 import { createVaultAccess } from './vault-access.ts';
 import { createPayments } from './payments.ts';
 import { BrowserConnectionError, createBrowserConnections } from './browser-connections.ts';
@@ -2538,7 +2544,8 @@ async function initializeApplication(
             }
           }
         }
-        const saved = (await vault.list(ownerId)).filter((entry) => entry.origin === origin);
+        const origins = siteOrigins(origin);
+        const saved = (await vault.list(ownerId)).filter((entry) => origins.includes(entry.origin));
         const chosen =
           savedLoginId !== undefined
             ? saved.find((entry) => entry.id === savedLoginId)

@@ -390,6 +390,13 @@ export function credentialOrigin(value: string) {
   return url.origin;
 }
 
+export function siteOrigins(origin: string) {
+  const url = new URL(origin);
+  if (!/[^.]\.[^.]/.test(url.hostname) || /^[\d.]+$|:/.test(url.hostname)) return [origin];
+  url.hostname = url.hostname.startsWith('www.') ? url.hostname.slice(4) : `www.${url.hostname}`;
+  return [origin, url.origin];
+}
+
 function savedCredentialOrigin(value: string) {
   const trimmed = value.trim();
   return credentialUrl(/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`)
@@ -1396,8 +1403,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       const selected = chosen?.kind === 'identifier' ? chosen : undefined;
       username = await stagedUsername(selected);
       const entries = await pool.query<EntryRow>(
-        'SELECT e.* FROM vault_entries e WHERE e.owner_id=$1 AND e.origin=$2 ORDER BY e.updated_at DESC',
-        [row.owner_id, row.origin],
+        'SELECT e.* FROM vault_entries e WHERE e.owner_id=$1 AND e.origin=ANY($2) ORDER BY e.updated_at DESC',
+        [row.owner_id, siteOrigins(row.origin)],
       );
       const matches =
         row.kind === 'password' && selected && username === undefined ? [] : entries.rows;
@@ -1608,8 +1615,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             selected?.entry_id &&
             !(
               await client.query(
-                'SELECT id FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=$3 FOR SHARE',
-                [selected.entry_id, ownerId, input.origin],
+                'SELECT id FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3) FOR SHARE',
+                [selected.entry_id, ownerId, siteOrigins(input.origin)],
               )
             ).rowCount
           )
@@ -1622,8 +1629,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             throw new VaultError('An authenticator key can only enter a verification code.', 409);
           const row = (
             await client.query<EntryRow>(
-              'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=$3 FOR SHARE',
-              [source.entryId, ownerId, input.origin],
+              'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3) FOR SHARE',
+              [source.entryId, ownerId, siteOrigins(input.origin)],
             )
           ).rows[0];
           if (!row) throw new VaultError('This saved login is no longer available.', 409);
@@ -1692,8 +1699,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
           if (entryId) {
             const row = (
               await client.query<EntryRow>(
-                'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=$3 FOR SHARE',
-                [entryId, ownerId, input.origin],
+                'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3) FOR SHARE',
+                [entryId, ownerId, siteOrigins(input.origin)],
               )
             ).rows[0];
             if (!row) throw new VaultError('No saved password is available for this website.', 404);
@@ -2049,8 +2056,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
     const root = await rootTurn(pool, turn, ownerId);
     if (!root) return undefined;
     const { rows } = await pool.query<EntryRow>(
-      'SELECT * FROM vault_entries WHERE owner_id=$1 AND origin=$2',
-      [ownerId, origin],
+      'SELECT * FROM vault_entries WHERE owner_id=$1 AND origin=ANY($2)',
+      [ownerId, siteOrigins(origin)],
     );
     if (!rows.length) return undefined;
     const credentialKey = await key();
