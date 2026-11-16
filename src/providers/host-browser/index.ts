@@ -45,6 +45,7 @@ export function createHostBrowserComputer(options: {
     dataRoot: resolve(options.dataRoot, 'host-browser'),
     executable: options.driver ?? hostBrowserDriver(),
     browserExecutable,
+    visible: true,
     maxLiveSessions: options.maxLiveSessions,
   });
 }

@@ -113,7 +113,7 @@ NOD_BROWSER_EXECUTABLE="/Applications/Google Chrome Beta.app/Contents/MacOS/Goog
 
 - Nod starts its own copies of that browser, one per session, with its own profiles under `NOD_DATA_ROOT/host-browser`. It doesn't use your everyday profile or its sign-ins, and it runs next to a copy you already have open.
 - The trust check, Vault, known-secret masking, the passkey block and the public-addresses-only proxy work the same way.
-- The windows open on your desktop, minimized on a Mac. The browser keeps its own sandbox on.
+- The windows open on your desktop, where you can watch Nod work. The browser keeps its own sandbox on.
 - The container boundary is gone: the browser runs as your user on your computer. Use this only on a computer you trust Nod to browse from.
 - The desktop app reads the variable from the environment it was started with. Without it, the app reads the path from a one-line `browser-executable` file in its data folder (`~/Library/Application Support/nod` on a Mac).
 

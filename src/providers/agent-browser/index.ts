@@ -228,6 +228,7 @@ export function createAgentBrowserComputer(options: {
   sandbox?: boolean;
   platform?: NodeJS.Platform;
   headless?: boolean;
+  visible?: boolean;
   evictIdleMs?: number;
   maxLiveSessions?: number;
   viewport?: { width: number; height: number };
@@ -265,6 +266,7 @@ export function createAgentBrowserComputer(options: {
   const viewport = options.viewport;
   const platform = options.platform ?? process.platform;
   const headed = options.headless === undefined ? platform === 'darwin' : !options.headless;
+  const visible = options.visible === true;
   const evictIdleMs = options.evictIdleMs ?? 5 * 60_000;
   const maxLiveSessions = Math.max(1, options.maxLiveSessions ?? 4);
   const holding = (state: BrowserState) =>
@@ -566,7 +568,7 @@ export function createAgentBrowserComputer(options: {
             `,--disk-cache-dir=${cachePath(state)},--disk-cache-size=67108864` +
             (locale ? `,--accept-lang=${locale}` : '') +
             (sandbox ? '' : ',--no-sandbox') +
-            (headed && platform === 'darwin' ? ',--start-minimized' : '') +
+            (headed && platform === 'darwin' && !visible ? ',--start-minimized' : '') +
             (state.saved.restoreSession ? ',--restore-last-session' : ''),
           '--download-path',
           resolve(runtimeRoot, 'downloads', state.id),
