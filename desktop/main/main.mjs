@@ -2240,6 +2240,10 @@ async function startEngine({ runtime, signal, pending = false }) {
     process.env.NOD_BROWSER_EXECUTABLE ??
     (await readFile(join(app.getPath('userData'), 'browser-executable'), 'utf8').catch(() => ''))
   ).trim();
+  const browserCdp = (
+    process.env.NOD_BROWSER_CDP ??
+    (await readFile(join(app.getPath('userData'), 'browser-cdp'), 'utf8').catch(() => ''))
+  ).trim();
   const environment = {
     ...baseEnvironment(),
     ...runtime.env,
@@ -2258,6 +2262,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     NOD_DATA_ROOT: profileRoot,
     NOD_WEB_ROOT: join(engineRoot, 'dist', 'web'),
     ...(browserExecutable ? { NOD_BROWSER_EXECUTABLE: browserExecutable } : {}),
+    ...(browserCdp ? { NOD_BROWSER_CDP: browserCdp } : {}),
     ...(process.env.NOD_FEEDBACK_URL === '' ? { NOD_FEEDBACK_ENABLED: 'false' } : {}),
     ...(tracesToken ? { NOD_TRACES_TOKEN: tracesToken } : {}),
     PI_CODING_AGENT_DIR: join(profileRoot, 'pi'),

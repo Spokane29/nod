@@ -82,8 +82,12 @@ function hostAvailability(context: RuntimeContext) {
 
 function channelAvailability(context: RuntimeContext) {
   const host = hostAvailability(context);
-  if (!context.hostBrowser) return host;
-  return `${host}${host ? '\n' : ''}Browser: Your browser tool drives ${context.hostBrowser} on the owner's own computer, in windows Nod opens with its own profiles and sign-ins. It is not a Linux browser. When the owner asks you to use Chrome or their browser, use your browser tool and say it is ${context.hostBrowser}; never answer that you cannot control Chrome. It does not see the tabs or sign-ins of the browser windows the owner opened themselves.`;
+  const browser = context.hostBrowser;
+  if (!browser) return host;
+  const note = browser.shared
+    ? `Browser: Your browser tool works inside the ${browser.name} window that is already open on the owner's own computer. It is not a Linux browser. Each task opens its own tab there and the tab stays open when the task ends, so sign-ins you complete stay signed in for the owner and their other tools. Sites may already be signed in; check before signing in again. Use only tabs you opened; never close, reload or navigate a tab you did not open. When the owner asks you to use Chrome or their browser, use your browser tool; never answer that you cannot control Chrome.`
+    : `Browser: Your browser tool drives ${browser.name} on the owner's own computer, in windows Nod opens with its own profiles and sign-ins. It is not a Linux browser. When the owner asks you to use Chrome or their browser, use your browser tool and say it is ${browser.name}; never answer that you cannot control Chrome. It does not see the tabs or sign-ins of the browser windows the owner opened themselves.`;
+  return `${host}${host ? '\n' : ''}${note}`;
 }
 
 function credentialStatusBlock(context: RuntimeContext) {

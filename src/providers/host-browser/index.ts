@@ -2,7 +2,9 @@ import { accessSync, constants } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { Computer } from '../../ports/computer.ts';
+import { loopbackHost } from '../../shared/loopback.ts';
 import { createAgentBrowserComputer } from '../agent-browser/index.ts';
+import { publicUrl } from '../agent-browser/network.ts';
 
 export function hostBrowserDriver(
   platform: NodeJS.Platform = process.platform,
@@ -25,13 +27,47 @@ export function hostBrowserName(browserExecutable: string) {
   return basename(browserExecutable.trim()).replace(/\.exe$/i, '');
 }
 
+export function hostBrowserAddress(value: string) {
+  const trimmed = value.trim();
+  const url = URL.canParse(trimmed) ? new URL(trimmed) : new URL(`http://127.0.0.1:${trimmed}`);
+  if (
+    !['http:', 'ws:'].includes(url.protocol) ||
+    !loopbackHost(url.hostname) ||
+    !/^\d{2,5}$/.test(url.port) ||
+    url.username ||
+    url.password
+  )
+    throw new Error(
+      'NOD_BROWSER_CDP must be a debugging port or address on this computer, such as 9223 or http://127.0.0.1:9223.',
+    );
+  return url.port;
+}
+
 export function createHostBrowserComputer(options: {
   dataRoot: string;
-  browserExecutable: string;
+  browserExecutable?: string;
+  attach?: string;
   driver?: string;
   maxLiveSessions?: number;
 }): Computer {
-  const browserExecutable = options.browserExecutable.trim();
+  const dataRoot = resolve(options.dataRoot, 'host-browser');
+  const executable = options.driver ?? hostBrowserDriver();
+  if (options.attach) {
+    const computer = createAgentBrowserComputer({
+      dataRoot,
+      executable,
+      attach: hostBrowserAddress(options.attach),
+      maxLiveSessions: options.maxLiveSessions,
+    });
+    return {
+      ...computer,
+      act: async (threadId, input, signal) => {
+        if (input.action === 'open' && input.url) await publicUrl(input.url);
+        return computer.act(threadId, input, signal);
+      },
+    };
+  }
+  const browserExecutable = options.browserExecutable?.trim() ?? '';
   if (!isAbsolute(browserExecutable))
     throw new Error('NOD_BROWSER_EXECUTABLE must be the full path to a Chromium-based browser.');
   try {
@@ -42,8 +78,8 @@ export function createHostBrowserComputer(options: {
     );
   }
   return createAgentBrowserComputer({
-    dataRoot: resolve(options.dataRoot, 'host-browser'),
-    executable: options.driver ?? hostBrowserDriver(),
+    dataRoot,
+    executable,
     browserExecutable,
     visible: true,
     maxLiveSessions: options.maxLiveSessions,

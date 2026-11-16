@@ -316,9 +316,16 @@ export function modelEnvironment(
   };
 }
 
-const hostBrowser = process.env.NOD_BROWSER_EXECUTABLE
-  ? hostBrowserName(process.env.NOD_BROWSER_EXECUTABLE)
-  : undefined;
+const hostBrowser = process.env.NOD_BROWSER_CDP
+  ? {
+      name: process.env.NOD_BROWSER_EXECUTABLE
+        ? hostBrowserName(process.env.NOD_BROWSER_EXECUTABLE)
+        : 'browser',
+      shared: true,
+    }
+  : process.env.NOD_BROWSER_EXECUTABLE
+    ? { name: hostBrowserName(process.env.NOD_BROWSER_EXECUTABLE), shared: false }
+    : undefined;
 
 export function createDefaultAdapters(
   env: Record<string, string | undefined> = process.env,
@@ -507,9 +514,11 @@ export function createDefaultAdapters(
       configRoot: join(dataRoot, 'pi'),
       traces,
     }),
-    computer: env.NOD_BROWSER_EXECUTABLE
-      ? createHostBrowserComputer({ dataRoot, browserExecutable: env.NOD_BROWSER_EXECUTABLE })
-      : createContainerBrowserComputer({ dataRoot, container: env.BROWSER_CONTAINER }),
+    computer: env.NOD_BROWSER_CDP
+      ? createHostBrowserComputer({ dataRoot, attach: env.NOD_BROWSER_CDP })
+      : env.NOD_BROWSER_EXECUTABLE
+        ? createHostBrowserComputer({ dataRoot, browserExecutable: env.NOD_BROWSER_EXECUTABLE })
+        : createContainerBrowserComputer({ dataRoot, container: env.BROWSER_CONTAINER }),
     passwordManager: createOnePassword({
       open: desktopMode ? desktopOnePassword() : forkedOnePassword(env.NOD_APP_VERSION || 'source'),
     }),

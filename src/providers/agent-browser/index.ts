@@ -229,6 +229,7 @@ export function createAgentBrowserComputer(options: {
   platform?: NodeJS.Platform;
   headless?: boolean;
   visible?: boolean;
+  attach?: string;
   evictIdleMs?: number;
   maxLiveSessions?: number;
   viewport?: { width: number; height: number };
@@ -267,6 +268,7 @@ export function createAgentBrowserComputer(options: {
   const platform = options.platform ?? process.platform;
   const headed = options.headless === undefined ? platform === 'darwin' : !options.headless;
   const visible = options.visible === true;
+  const attach = options.attach;
   const evictIdleMs = options.evictIdleMs ?? 5 * 60_000;
   const maxLiveSessions = Math.max(1, options.maxLiveSessions ?? 4);
   const holding = (state: BrowserState) =>
@@ -536,8 +538,8 @@ export function createAgentBrowserComputer(options: {
     await writeFile(config, '{}', { mode: 0o600 });
     const initScript = resolve(runtimeRoot, 'browser-init.js');
     await writeFile(initScript, withoutPasskeys, { mode: 0o600 });
-    state.proxy ??= createBrowserProxy({ privateNetwork });
-    const proxyUrl = await state.proxy.url();
+    if (!attach) state.proxy ??= createBrowserProxy({ privateNetwork });
+    const proxyUrl = attach ? '' : await state.proxy!.url();
     const profile = profilePath(state);
     const timeZone = browserTimeZone(state.saved.timeZone);
     const locale = browserLocale(state.saved.locale);
@@ -551,25 +553,33 @@ export function createAgentBrowserComputer(options: {
           namespace,
           '--session',
           browserSessionId(state.id),
-          '--profile',
-          profile,
-          ...(state.browserExecutable ? ['--executable-path', state.browserExecutable] : []),
-          ...(headed ? ['--headed'] : []),
+          ...(attach
+            ? ['--cdp', attach, '--pin-tab']
+            : [
+                '--profile',
+                profile,
+                ...(state.browserExecutable ? ['--executable-path', state.browserExecutable] : []),
+                ...(headed ? ['--headed'] : []),
+              ]),
           '--no-webmcp',
           '--init-script',
           initScript,
           '--json',
-          '--proxy',
-          proxyUrl,
-          '--proxy-bypass',
-          '<-loopback>',
-          '--args',
-          '--disable-quic,--force-webrtc-ip-handling-policy=disable_non_proxied_udp,--disable-background-networking,--disable-crash-reporter,--disable-breakpad,--disable-gpu-rasterization,--enable-unsafe-swiftshader,--disable-blink-features=AutomationControlled,--disable-features=BackForwardCache' +
-            `,--disk-cache-dir=${cachePath(state)},--disk-cache-size=67108864` +
-            (locale ? `,--accept-lang=${locale}` : '') +
-            (sandbox ? '' : ',--no-sandbox') +
-            (headed && platform === 'darwin' && !visible ? ',--start-minimized' : '') +
-            (state.saved.restoreSession ? ',--restore-last-session' : ''),
+          ...(attach
+            ? []
+            : [
+                '--proxy',
+                proxyUrl,
+                '--proxy-bypass',
+                '<-loopback>',
+                '--args',
+                '--disable-quic,--force-webrtc-ip-handling-policy=disable_non_proxied_udp,--disable-background-networking,--disable-crash-reporter,--disable-breakpad,--disable-gpu-rasterization,--enable-unsafe-swiftshader,--disable-blink-features=AutomationControlled,--disable-features=BackForwardCache' +
+                  `,--disk-cache-dir=${cachePath(state)},--disk-cache-size=67108864` +
+                  (locale ? `,--accept-lang=${locale}` : '') +
+                  (sandbox ? '' : ',--no-sandbox') +
+                  (headed && platform === 'darwin' && !visible ? ',--start-minimized' : '') +
+                  (state.saved.restoreSession ? ',--restore-last-session' : ''),
+              ]),
           '--download-path',
           resolve(runtimeRoot, 'downloads', state.id),
           '--idle-timeout',
