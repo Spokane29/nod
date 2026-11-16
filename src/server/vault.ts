@@ -2,6 +2,7 @@ import { transaction } from './transaction.ts';
 import { createHash, createHmac, randomUUID } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
+import { getDomain } from 'tldts';
 import { z } from 'zod';
 import { openVaultValue, sealVaultValue } from './vault-crypto.ts';
 import { authenticatorCode } from './authenticator.ts';
@@ -390,11 +391,16 @@ export function credentialOrigin(value: string) {
   return url.origin;
 }
 
-export function siteOrigins(origin: string) {
+export function sitePattern(origin: string) {
+  const exact = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const url = new URL(origin);
-  if (!/[^.]\.[^.]/.test(url.hostname) || /^[\d.]+$|:/.test(url.hostname)) return [origin];
+  const domain =
+    url.protocol === 'https:' ? getDomain(url.hostname, { allowPrivateDomains: true }) : null;
+  if (domain) return `^https://([a-z0-9-]+\\.)*${exact(domain)}${url.port ? `:${url.port}` : ''}$`;
+  if (!/[^.]\.[^.]/.test(url.hostname) || /^[\d.]+$|:/.test(url.hostname))
+    return `^${exact(origin)}$`;
   url.hostname = url.hostname.startsWith('www.') ? url.hostname.slice(4) : `www.${url.hostname}`;
-  return [origin, url.origin];
+  return `^(${exact(origin)}|${exact(url.origin)})$`;
 }
 
 function savedCredentialOrigin(value: string) {
@@ -1403,8 +1409,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
       const selected = chosen?.kind === 'identifier' ? chosen : undefined;
       username = await stagedUsername(selected);
       const entries = await pool.query<EntryRow>(
-        'SELECT e.* FROM vault_entries e WHERE e.owner_id=$1 AND e.origin=ANY($2) ORDER BY e.updated_at DESC',
-        [row.owner_id, siteOrigins(row.origin)],
+        'SELECT e.* FROM vault_entries e WHERE e.owner_id=$1 AND e.origin ~ $2 ORDER BY e.updated_at DESC',
+        [row.owner_id, sitePattern(row.origin)],
       );
       const matches =
         row.kind === 'password' && selected && username === undefined ? [] : entries.rows;
@@ -1615,8 +1621,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             selected?.entry_id &&
             !(
               await client.query(
-                'SELECT id FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3) FOR SHARE',
-                [selected.entry_id, ownerId, siteOrigins(input.origin)],
+                'SELECT id FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin ~ $3 FOR SHARE',
+                [selected.entry_id, ownerId, sitePattern(input.origin)],
               )
             ).rowCount
           )
@@ -1629,8 +1635,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
             throw new VaultError('An authenticator key can only enter a verification code.', 409);
           const row = (
             await client.query<EntryRow>(
-              'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3) FOR SHARE',
-              [source.entryId, ownerId, siteOrigins(input.origin)],
+              'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin ~ $3 FOR SHARE',
+              [source.entryId, ownerId, sitePattern(input.origin)],
             )
           ).rows[0];
           if (!row) throw new VaultError('This saved login is no longer available.', 409);
@@ -1699,8 +1705,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
           if (entryId) {
             const row = (
               await client.query<EntryRow>(
-                'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin=ANY($3) FOR SHARE',
-                [entryId, ownerId, siteOrigins(input.origin)],
+                'SELECT * FROM vault_entries WHERE id=$1 AND owner_id=$2 AND origin ~ $3 FOR SHARE',
+                [entryId, ownerId, sitePattern(input.origin)],
               )
             ).rows[0];
             if (!row) throw new VaultError('No saved password is available for this website.', 404);
@@ -2056,8 +2062,8 @@ export async function createVault(pool: Pool, options: VaultOptions) {
     const root = await rootTurn(pool, turn, ownerId);
     if (!root) return undefined;
     const { rows } = await pool.query<EntryRow>(
-      'SELECT * FROM vault_entries WHERE owner_id=$1 AND origin=ANY($2)',
-      [ownerId, siteOrigins(origin)],
+      'SELECT * FROM vault_entries WHERE owner_id=$1 AND origin ~ $2',
+      [ownerId, sitePattern(origin)],
     );
     if (!rows.length) return undefined;
     const credentialKey = await key();

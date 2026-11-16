@@ -83,15 +83,15 @@ The private sign-in page shows you the full username of each saved login it can 
 
 ## Exact website origins
 
-A login works only on its exact origin: the protocol, host and port. One exception: a host and its `www` form, such as `example.com` and `www.example.com`, count as the same website. The browser checks the real origin of each field, including fields inside frames, so a lookalike page can't receive your password. For a login saved for `https://reports.example.com`:
+A login works only on its exact origin: the protocol, host and port. One exception: over HTTPS, hosts under the same registered domain, such as `example.com`, `www.example.com` and `login.example.com`, count as the same website, because many services sign you in on a separate host. Hosts that share only a public suffix, such as two `github.io` sites, stay separate. The browser checks the real origin of each field, including fields inside frames, so a lookalike page can't receive your password. For a login saved for `https://reports.example.com`:
 
-| Page                                 | Can use the login?           |
-| ------------------------------------ | ---------------------------- |
-| `https://reports.example.com/weekly` | Yes, the path doesn't matter |
-| `https://www.reports.example.com`    | Yes, the `www` form          |
-| `https://login.example.com`          | No, a different host         |
-| `http://reports.example.com`         | No, a different protocol     |
-| `https://reports.example.com:8443`   | No, a different port         |
+| Page                                 | Can use the login?              |
+| ------------------------------------ | ------------------------------- |
+| `https://reports.example.com/weekly` | Yes, the path doesn't matter    |
+| `https://www.reports.example.com`    | Yes, the `www` form             |
+| `https://login.example.com`          | Yes, the same registered domain |
+| `http://reports.example.com`         | No, a different protocol        |
+| `https://reports.example.com:8443`   | No, a different port            |
 
 ## When Nod asks first
 

@@ -210,7 +210,7 @@ import {
   createVault,
   credentialOrigin,
   sealedDataExists,
-  siteOrigins,
+  sitePattern,
 } from './vault.ts';
 import { createVaultAccess } from './vault-access.ts';
 import { createPayments } from './payments.ts';
@@ -2553,8 +2553,8 @@ async function initializeApplication(
             }
           }
         }
-        const origins = siteOrigins(origin);
-        const saved = (await vault.list(ownerId)).filter((entry) => origins.includes(entry.origin));
+        const site = new RegExp(sitePattern(origin));
+        const saved = (await vault.list(ownerId)).filter((entry) => site.test(entry.origin));
         const chosen =
           savedLoginId !== undefined
             ? saved.find((entry) => entry.id === savedLoginId)
