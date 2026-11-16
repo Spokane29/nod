@@ -241,6 +241,9 @@ async function open(fresh, label) {
     application,
     '--env',
     `NOD_DESKTOP_USER_DATA=${profile}`,
+    ...(process.env.NOD_BROWSER_EXECUTABLE
+      ? ['--env', `NOD_BROWSER_EXECUTABLE=${process.env.NOD_BROWSER_EXECUTABLE}`]
+      : []),
   ]);
   await mkdir(work, { recursive: true });
   await writeFile(join(work, 'current-profile.json'), JSON.stringify({ name: label }), {

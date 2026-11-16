@@ -115,7 +115,7 @@ NOD_BROWSER_EXECUTABLE="/Applications/Google Chrome Beta.app/Contents/MacOS/Goog
 - The trust check, Vault, known-secret masking, the passkey block and the public-addresses-only proxy work the same way.
 - The windows open on your desktop, minimized on a Mac. The browser keeps its own sandbox on.
 - The container boundary is gone: the browser runs as your user on your computer. Use this only on a computer you trust Nod to browse from.
-- The desktop app reads the variable from the environment it was started with.
+- The desktop app reads the variable from the environment it was started with. Without it, the app reads the path from a one-line `browser-executable` file in its data folder (`~/Library/Application Support/nod` on a Mac).
 
 ## Browser handoff
 

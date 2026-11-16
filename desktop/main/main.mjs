@@ -1163,7 +1163,6 @@ function baseEnvironment() {
       'NOD_TRACES_TOKEN',
       'NOD_ONBOARDING_EMAIL_URL',
       'OTEL_EXPORTER_OTLP_ENDPOINT',
-      'NOD_BROWSER_EXECUTABLE',
     ]
       .filter((key) => typeof process.env[key] === 'string')
       .map((key) => [key, process.env[key]]),
@@ -2237,6 +2236,10 @@ async function startEngine({ runtime, signal, pending = false }) {
     typeof nodBuild?.tracesToken === 'string' ? nodBuild.tracesToken : process.env.NOD_TRACES_TOKEN;
   if (tracesToken) knownSecrets.add(tracesToken);
   const analytics = await analyticsConfiguration().catch(() => ({ enabled: false }));
+  const browserExecutable = (
+    process.env.NOD_BROWSER_EXECUTABLE ??
+    (await readFile(join(app.getPath('userData'), 'browser-executable'), 'utf8').catch(() => ''))
+  ).trim();
   const environment = {
     ...baseEnvironment(),
     ...runtime.env,
@@ -2254,6 +2257,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     NOD_PUBLIC_URL: engineOrigin,
     NOD_DATA_ROOT: profileRoot,
     NOD_WEB_ROOT: join(engineRoot, 'dist', 'web'),
+    ...(browserExecutable ? { NOD_BROWSER_EXECUTABLE: browserExecutable } : {}),
     ...(process.env.NOD_FEEDBACK_URL === '' ? { NOD_FEEDBACK_ENABLED: 'false' } : {}),
     ...(tracesToken ? { NOD_TRACES_TOKEN: tracesToken } : {}),
     PI_CODING_AGENT_DIR: join(profileRoot, 'pi'),
