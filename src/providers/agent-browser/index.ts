@@ -954,7 +954,15 @@ export function createAgentBrowserComputer(options: {
         try {
           if (!state.socket && viewport)
             await command(state, { action: 'navigate', url: 'about:blank' }, { signal });
-          await command(state, { action: 'navigate', url: url.href }, { signal });
+          await command(state, { action: 'navigate', url: url.href }, { signal }).catch((error) => {
+            if (
+              !attach ||
+              !(error instanceof DaemonCommandError) ||
+              !/tab_gone/.test(error.detail ?? '')
+            )
+              throw error;
+            return command(state, { action: 'tab_new', url: url.href }, { signal });
+          });
           state.saved.navigationFailed = false;
         } catch (error) {
           if (
