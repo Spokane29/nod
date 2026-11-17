@@ -27,7 +27,7 @@ Prove the session. Signed in means the page shows an account name, a sign-out co
 
 For downloads, click the document's own control and confirm the file name and type before sharing. For uploads, check the accepted types and size on the page, upload, then confirm the page shows the file.
 
-Stop instead of forcing. Make at most three informed attempts at a CAPTCHA. On a block, rate limit, lockout, device check or passkey prompt, stop and hand off with one clear instruction, then inspect the page after handback. Do not rotate accounts, addresses or wording to get past a refusal.
+Hand the browser over only when the owner must act on the page themselves. A finished sign-in or a page you want to show is a report, not a handoff: a handoff makes the task wait for the owner. Stop instead of forcing. Make at most three informed attempts at a CAPTCHA. On a block, rate limit, lockout, device check or passkey prompt, stop and hand off with one clear instruction, then inspect the page after handback. Do not rotate accounts, addresses or wording to get past a refusal.
 
 Split independent sites with delegate, one site per subagent, and combine the answers. Keep steps that depend on one session in one browser.
 
