@@ -121,7 +121,7 @@ NOD_BROWSER_EXECUTABLE="/Applications/Google Chrome Beta.app/Contents/MacOS/Goog
 
 Set `NOD_BROWSER_CDP` to the debugging port of a Chromium-based browser already running on the same computer, such as `9223`. Nod then works inside that browser in place of starting one. The desktop app also reads the port from a one-line `browser-cdp` file in its data folder.
 
-- Each session opens its own tab and uses only that tab. The tab and the browser stay open when the session ends, so a completed sign-in stays signed in for you and for other tools that use that browser.
+- Each session works in one tab. When the first page it opens is on a site that already has an HTTPS tab open (same registered domain) that no other Nod session is using, it takes over that tab instead of opening a new one; otherwise it opens a new tab. The tab and the browser stay open when the session ends, so a completed sign-in stays signed in for you and for other tools that use that browser.
 - Nod can read and act on any website that browser is already signed in to. Attach only a browser whose sign-ins you want Nod to have.
 - The public-addresses-only proxy and the passkey block don't apply. Nod still refuses to open a private address itself, but a page can link to one.
 - The trust check, Vault and known-secret masking work the same way.

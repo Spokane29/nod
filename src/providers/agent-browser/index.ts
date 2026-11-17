@@ -3,6 +3,7 @@ import { mkdir, readFile, readlink, rm, stat, writeFile } from 'node:fs/promises
 import { hostname } from 'node:os';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { getDomain } from 'tldts';
 import { z } from 'zod';
 import type {
   BrowserAction,
@@ -70,6 +71,7 @@ interface BrowserState {
   recovered?: boolean;
   saved: StoredScreen;
   browserExecutable?: string;
+  tabTarget?: string;
 }
 export interface BrowserDiagnostic {
   at: string;
@@ -584,7 +586,9 @@ export function createAgentBrowserComputer(options: {
           resolve(runtimeRoot, 'downloads', state.id),
           '--idle-timeout',
           '86400s',
-          ...(action === 'close' ? ['close'] : ['open', String(request.url)]),
+          ...(action === 'close'
+            ? ['close']
+            : ['open', attach ? 'about:blank' : String(request.url)]),
         ],
         {
           cwd: runtimeRoot,
@@ -609,6 +613,10 @@ export function createAgentBrowserComputer(options: {
       await drainInterruptedCommand(state, 'connect', () => daemonSocket(state, options.signal));
       state.recovered = false;
       state.pageSize = undefined;
+      if (attach) {
+        await adoptTab(state, String(request.url), options.signal);
+        return command(state, { action: 'navigate', url: String(request.url) }, options);
+      }
       if (viewport)
         await command(
           state,
@@ -1474,6 +1482,51 @@ export function createAgentBrowserComputer(options: {
     } finally {
       devtools?.close();
     }
+  }
+
+  async function adoptTab(state: BrowserState, url: string, signal?: AbortSignal) {
+    const tabs = z
+      .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
+      .parse((await command(state, { action: 'tab_list' }, { signal })).tabs);
+    const own = tabs.find((item) => item.active)?.targetId;
+    state.tabTarget = own;
+    const site = getDomain(new URL(url).hostname, { allowPrivateDomains: true });
+    if (!site || !own) return;
+    let pages: { id: string; type: string; url: string }[] = [];
+    try {
+      pages = z
+        .array(z.object({ id: z.string(), type: z.string(), url: z.string() }).passthrough())
+        .parse(await (await fetch(`http://127.0.0.1:${attach}/json`, { signal })).json());
+    } catch {
+      return;
+    }
+    const taken = new Set(
+      [...browsers.values()]
+        .filter((other) => other !== state && !other.closed && other.tabTarget)
+        .map((other) => other.tabTarget),
+    );
+    const reuse = pages.find((page) => {
+      if (page.type !== 'page' || page.id === own || taken.has(page.id)) return false;
+      try {
+        const address = new URL(page.url);
+        return (
+          address.protocol === 'https:' &&
+          getDomain(address.hostname, { allowPrivateDomains: true }) === site
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (!reuse) return;
+    state.tabTarget = reuse.id;
+    try {
+      await command(state, { action: 'tab_switch', tabId: reuse.id }, { signal });
+    } catch {
+      state.tabTarget = own;
+      return;
+    }
+    await command(state, { action: 'tab_close', tabId: own }, { signal }).catch(() => {});
+    await foreground(state, signal);
   }
 
   async function foreground(state: BrowserState, signal?: AbortSignal) {
