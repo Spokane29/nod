@@ -127,6 +127,7 @@ interface SubmitUserMessageOptions {
   prompt?: string;
   answer?: ChatConfirmationInput['answer'];
   prepareAttachments?: (client: PoolClient, threadId: string) => Promise<Artifact[]>;
+  afterLock?: (client: PoolClient) => Promise<void>;
   persistSubmission?: (client: PoolClient, result: SubmitUserMessageResult) => Promise<void>;
   onInserted?: () => void;
   stopSignal?: AbortSignal;
@@ -636,6 +637,7 @@ export async function submitUserMessage(
   };
   const submit = async (client: PoolClient): Promise<SubmitUserMessageResult> => {
     const thread = await lockThread(client);
+    await options.afterLock?.(client);
     if (options.threadId !== undefined && options.threadId !== thread.id)
       throw httpError('This conversation has been reset. Reload it before continuing.');
     if (options.clientMessageId) {

@@ -330,8 +330,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       pool,
       ownerId,
       ready: () => publicConfiguration().llmReady,
-      submit: (text, attachments, input) =>
-        (dependencies.submitMessage ?? submitUserMessage)(text, attachments, input),
+      submit: (text, attachments, input) => submitUserMessage(text, attachments, input),
     });
   }
   const turnFields = `u.id,u.status,u.source,u.error,u.created_at AS "createdAt",u.finished_at AS "finishedAt",

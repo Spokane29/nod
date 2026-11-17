@@ -548,6 +548,12 @@ async function startSigninInboxFromSettings() {
           noLink: true,
         })
       ).response,
+    ...(safeStorage.isEncryptionAvailable()
+      ? {
+          seal: (text) => safeStorage.encryptString(text).toString('base64'),
+          unseal: (text) => safeStorage.decryptString(Buffer.from(text, 'base64')),
+        }
+      : {}),
     diagnostic: (line) => void writeDiagnostic(line).catch(() => {}),
   });
   if (!prepared || quitting) return;

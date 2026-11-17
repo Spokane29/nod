@@ -27,9 +27,12 @@ const hour = 3_600_000;
 const day = 24 * hour;
 const siteKey = /^[a-z0-9]{2,20}$/;
 const requestName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
-const resetName = /^([a-z0-9]{2,20})\.reset$/;
-const segment = /^[A-Za-z0-9._~-]{1,40}$/;
-const label = /^[a-z0-9-]{1,30}$/;
+export const recordsFolder = 'signin-records';
+const resumeName = /^([a-z0-9]{2,20})\.signin-resume$/;
+const segment = /^[a-z0-9]{1,24}$/;
+const label = /^[a-z0-9]{1,30}$|^[a-z0-9]{1,15}-[a-z0-9]{1,15}$/;
+const suffix = /^[a-z]{2,24}$/;
+const localSuffix = new Set(['localhost', 'local', 'internal', 'lan', 'home', 'arpa', 'test']);
 
 export function signinInboxPath(environment, fileText, home = homedir()) {
   const value = (environment ?? '').trim() || (fileText ?? '').trim();
@@ -38,8 +41,6 @@ export function signinInboxPath(environment, fileText, home = homedir()) {
     value === '~' ? home : value.startsWith('~/') ? join(home, value.slice(2)) : value;
   return isAbsolute(expanded) ? resolve(expanded) : '';
 }
-
-const plainWords = (value) => (value.match(/-/g) ?? []).length <= 2;
 
 export function signinUrl(value) {
   if (typeof value !== 'string' || value.length > 100 || /[?#@\s\\]/.test(value)) return undefined;
@@ -60,12 +61,17 @@ export function signinUrl(value) {
   )
     return undefined;
   const labels = url.hostname.split('.');
-  if (labels.length < 2 || !labels.every((part) => label.test(part) && plainWords(part)))
+  if (
+    labels.length < 2 ||
+    labels.length > 4 ||
+    !suffix.test(labels.at(-1)) ||
+    localSuffix.has(labels.at(-1)) ||
+    !labels.every((part) => label.test(part) && !part.startsWith('xn--'))
+  )
     return undefined;
   const parts = url.pathname.split('/').slice(1);
   if (parts.at(-1) === '') parts.pop();
-  if (parts.length > 4 || !parts.every((part) => segment.test(part) && plainWords(part)))
-    return undefined;
+  if (parts.length > 2 || !parts.every((part) => segment.test(part))) return undefined;
   return value;
 }
 
@@ -129,7 +135,10 @@ export function pacificStamp(date) {
 }
 
 async function readSmall(path, limit) {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => undefined);
+  const handle = await open(
+    path,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  ).catch(() => undefined);
   if (!handle) return undefined;
   try {
     const info = await handle.stat();
@@ -219,31 +228,44 @@ export function allowListDialog(sites) {
 }
 
 export async function loadAllowList(options) {
-  const { dataDir, showDialog } = options;
+  const { dataDir, showDialog, seal, unseal } = options;
+  if (typeof seal !== 'function' || typeof unseal !== 'function')
+    return { reason: 'this computer cannot protect the approval' };
   const text = await readSmall(join(dataDir, allowFile), allowBytes);
   if (text === undefined) return { reason: 'the allow-list is missing or unreadable' };
   const parsed = parseAllowList(text);
   if (!parsed) return { reason: 'the allow-list is not valid' };
   if (!parsed.sites.size) return { reason: 'the allow-list has no valid sites' };
   const hash = createHash('sha256').update(text).digest('hex');
-  const approved = ((await readSmall(join(dataDir, approvedFile), 200)) ?? '').trim();
-  if (approved === hash) return { sites: parsed.sites, skipped: parsed.skipped };
+  const approved = ((await readSmall(join(dataDir, approvedFile), 4096)) ?? '').trim();
+  let opened;
+  try {
+    opened = approved ? await unseal(approved) : undefined;
+  } catch {
+    opened = undefined;
+  }
+  if (opened === hash) return { sites: parsed.sites, skipped: parsed.skipped };
   const answer = await showDialog(allowListDialog(parsed.sites));
   if (answer !== 0) return { reason: 'the allow-list was not approved' };
-  await writeAtomic(join(dataDir, approvedFile), `${hash}\n`);
+  await writeAtomic(join(dataDir, approvedFile), `${await seal(hash)}\n`);
   return { sites: parsed.sites, skipped: parsed.skipped };
 }
 
 export async function prepareSigninInbox(options) {
-  const { environment, setting, dataDir, home, showDialog, diagnostic = () => {} } = options;
+  const { environment, setting, dataDir, home, showDialog, seal, unseal } = options;
+  const diagnostic = options.diagnostic ?? (() => {});
   const inbox = signinInboxPath(environment, setting, home);
   if (!inbox) return undefined;
+  if ((options.platform ?? process.platform) !== 'darwin') {
+    diagnostic('Sign-in inbox is off: it is available on macOS only.');
+    return undefined;
+  }
   const problem = await inboxLocationProblem(inbox, home, options.fs);
   if (problem) {
     diagnostic(`Sign-in inbox is off: ${problem}.`);
     return undefined;
   }
-  const loaded = await loadAllowList({ dataDir, showDialog });
+  const loaded = await loadAllowList({ dataDir, showDialog, seal, unseal });
   if (!loaded.sites) {
     diagnostic(`Sign-in inbox is off: ${loaded.reason}.`);
     return undefined;
@@ -303,7 +325,7 @@ export function createGate(options) {
       if (state.blocked[site])
         return {
           state: 'reject',
-          reason: `site paused after ${unconfirmedLimit} sign-ins that were not confirmed; drop ${site}.reset to resume`,
+          reason: `site paused after ${unconfirmedLimit} sign-ins that were not confirmed; put an empty ${site}.signin-resume file in Nod's data folder to resume`,
         };
       const recent = state.accepted.filter(([, at]) => now - at < day);
       const last = recent.filter(([name]) => name === site).map(([, at]) => at);
@@ -358,10 +380,11 @@ export function startSigninInbox(options) {
   });
   const intervals = { missing: 60_000, idle: 60_000, pending: 15_000, ...options.intervals };
   const debounceMs = options.debounceMs ?? 500;
-  const logPath = join(inbox, 'log.txt');
-  const acceptedLogPath = join(inbox, 'accepted-log.txt');
-  const acceptedDirectory = join(inbox, 'accepted');
-  const rejectedDirectory = join(inbox, 'rejected');
+  const records = join(options.dataDir, recordsFolder);
+  const logPath = join(records, 'log.txt');
+  const acceptedLogPath = join(records, 'accepted-log.txt');
+  const acceptedDirectory = join(records, 'accepted');
+  const rejectedDirectory = join(records, 'rejected');
   const firstSeen = new Map();
   const stuck = new Set();
   const noted = new Set();
@@ -375,11 +398,16 @@ export function startSigninInbox(options) {
   async function appendLog(path, line) {
     const handle = await open(
       path,
-      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW,
+      constants.O_WRONLY |
+        constants.O_APPEND |
+        constants.O_CREAT |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK,
       0o600,
     ).catch(() => undefined);
     if (!handle) return;
     try {
+      if (!(await handle.stat()).isFile()) return;
       await handle.appendFile(line);
     } catch {
     } finally {
@@ -393,7 +421,7 @@ export function startSigninInbox(options) {
     if (decision === 'accepted') return appendLog(acceptedLogPath, line);
     const info = await lstat(logPath).catch(() => undefined);
     if (info?.isFile() && info.size > logBytes)
-      await rename(logPath, join(inbox, 'log.1.txt')).catch(() => {});
+      await rename(logPath, join(records, 'log.1.txt')).catch(() => {});
     await appendLog(logPath, line);
   }
 
@@ -416,7 +444,7 @@ export function startSigninInbox(options) {
     );
     dated.sort((a, b) => a[1] - b[1]);
     for (const [name] of dated.slice(0, names.length - limit))
-      await rm(join(directory, name), { force: true, recursive: true }).catch(() => {});
+      await rm(join(directory, name), { force: true }).catch(() => {});
   }
 
   async function reject(name, site, reason, identity) {
@@ -431,7 +459,7 @@ export function startSigninInbox(options) {
       await rename(join(inbox, name), `${target}.json`);
       await writeNew(`${target}.reason.txt`, `${reason}\n`).catch(() => {});
     } catch {
-      const removed = await rm(join(inbox, name), { force: true, recursive: true }).then(
+      const removed = await rm(join(inbox, name), { force: true }).then(
         () => true,
         () => false,
       );
@@ -461,16 +489,20 @@ export function startSigninInbox(options) {
     firstSeen.set(identity, seen);
     if (firstSeen.size > 1000) firstSeen.clear();
     if (info.isSymbolicLink() || !info.isFile()) {
-      await reject(name, '', 'not a regular file', identity);
+      if (info.isDirectory()) stuck.add(identity);
+      else await rm(path, { force: true }).catch(() => stuck.add(identity));
+      firstSeen.delete(identity);
+      await log('', 'rejected', 'not a regular file');
       return 'done';
     }
     if (info.size > requestBytes) {
       await reject(name, '', 'file too large', identity);
       return 'done';
     }
-    const handleFile = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(
-      () => undefined,
-    );
+    const handleFile = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    ).catch(() => undefined);
     if (!handleFile) {
       await reject(name, '', 'not a regular file', identity);
       return 'done';
@@ -578,8 +610,8 @@ export function startSigninInbox(options) {
         failure = 'could not reach nod';
       }
     if (busy) {
-      if (!(await restore(claimed, path)))
-        await log(result.site, 'rejected', 'superseded while waiting');
+      if (await restore(claimed, path)) firstSeen.set(identity, seen);
+      else await log(result.site, 'rejected', 'superseded while waiting');
       return 'deferred';
     }
     gate.record(result.site, now);
@@ -615,17 +647,20 @@ export function startSigninInbox(options) {
     return 'done';
   }
 
-  async function handleReset(name, site) {
-    const path = join(inbox, name);
-    const info = await lstat(path).catch(() => undefined);
-    if (!info) return;
-    const known = sites.has(site) && info.isFile() && !info.isSymbolicLink();
-    if (known && !(await quarantined(path))) {
-      gate.reset(site);
-      await gate.save().catch(() => {});
-      await log(site, 'reset', 'site resumed by the owner');
-    } else await log('', 'ignored', 'reset file not accepted');
-    await rm(path, { force: true }).catch(() => {});
+  async function resumeSites() {
+    const names = await readdir(options.dataDir).catch(() => []);
+    for (const name of names) {
+      const site = resumeName.exec(name)?.[1];
+      if (!site) continue;
+      const path = join(options.dataDir, name);
+      const info = await lstat(path).catch(() => undefined);
+      if (info?.isFile() && !info.isSymbolicLink() && sites.has(site)) {
+        gate.reset(site);
+        await gate.save().catch(() => {});
+        await log(site, 'resumed', 'site resumed from the data folder');
+      }
+      await rm(path, { force: true }).catch(() => {});
+    }
   }
 
   async function settle() {
@@ -675,17 +710,14 @@ export function startSigninInbox(options) {
       } catch {
         watcher = undefined;
       }
+    await ensure(records).catch(() => {});
     await gate.settled().catch(() => {});
+    await resumeSites();
     const names = await readdir(inbox).catch(() => []);
     let deferred = false;
     let attempts = 0;
     for (const name of names.sort()) {
       if (stopped) return 0;
-      const reset = resetName.exec(name);
-      if (reset) {
-        await handleReset(name, reset[1]);
-        continue;
-      }
       if (!requestName.test(name)) continue;
       if (attempts >= passLimit) {
         deferred = true;
