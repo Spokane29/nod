@@ -137,7 +137,7 @@ Another program on the same Mac can ask the desktop app to sign in to one pre-ap
 A request file holds `site` and, for jobs other than a sign-in, `job` and `ref`. Any other field refuses the request. The jobs are:
 
 - `signin` (the default): sign in and leave the tab open.
-- `status`: read the status, hold expiry, due dates and balance of up to 10 booking numbers (`ref`, comma-separated). The reply starts with DUE-SOON or ALL-CLEAR.
+- `status`: read the status, hold expiry, due dates and balance of up to 10 booking numbers (`ref`, comma-separated). The reply's first line is exactly DUE-SOON, UNKNOWN or ALL-CLEAR.
 - `invoice`: download one booking's invoice or confirmation with the portal's own control.
 - `hold`: prepare a courtesy hold for one 4Vacations quote (`ref`), read from the 4Vacations admin page. Nod stops before the final hold control and asks you; only your yes places the hold. A hold that costs money or needs a card is refused. The reply ends with a `BOOKING <number> EXPIRES <time>` line.
 
