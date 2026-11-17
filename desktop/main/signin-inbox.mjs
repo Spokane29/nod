@@ -251,26 +251,43 @@ export async function loadAllowList(options) {
   return { sites: parsed.sites, skipped: parsed.skipped };
 }
 
+export const statusFile = 'status.json';
+
+export async function writeSigninStatus(dataDir, fields, clock = Date.now) {
+  try {
+    const records = join(dataDir, recordsFolder);
+    await mkdir(records, { recursive: true, mode: 0o700 });
+    const info = await lstat(records);
+    if (!info.isDirectory() || info.isSymbolicLink()) return;
+    const path = join(records, statusFile);
+    const previous = JSON.parse((await readSmall(path, 16_384)) ?? '{}');
+    const next = { ...previous, ...fields, updatedAt: pacificStamp(new Date(clock())).text };
+    await writeAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+  } catch {}
+}
+
 export async function prepareSigninInbox(options) {
   const { environment, setting, dataDir, home, showDialog, seal, unseal } = options;
   const diagnostic = options.diagnostic ?? (() => {});
+  const status = options.status ?? (() => {});
+  const off = async (reason) => {
+    diagnostic(`Sign-in inbox is off: ${reason}.`);
+    await status({ state: 'off', reason, lastPass: null });
+    return undefined;
+  };
   const inbox = signinInboxPath(environment, setting, home);
-  if (!inbox) return undefined;
-  if ((options.platform ?? process.platform) !== 'darwin') {
-    diagnostic('Sign-in inbox is off: it is available on macOS only.');
-    return undefined;
-  }
+  if (!inbox)
+    return off(
+      'no inbox folder is set (NOD_SIGNIN_INBOX or the signin-inbox file in the data folder)',
+    );
+  if ((options.platform ?? process.platform) !== 'darwin')
+    return off('it is available on macOS only');
   const problem = await inboxLocationProblem(inbox, home, options.fs);
-  if (problem) {
-    diagnostic(`Sign-in inbox is off: ${problem}.`);
-    return undefined;
-  }
+  if (problem) return off(problem);
   const loaded = await loadAllowList({ dataDir, showDialog, seal, unseal });
-  if (!loaded.sites) {
-    diagnostic(`Sign-in inbox is off: ${loaded.reason}.`);
-    return undefined;
-  }
+  if (!loaded.sites) return off(loaded.reason);
   if (loaded.skipped.length) diagnostic('Sign-in inbox ignored invalid allow-list entries.');
+  await status({ state: 'on', reason: null, inbox, sites: [...loaded.sites.keys()] });
   return { inbox, sites: loaded.sites, dataDir };
 }
 
@@ -692,8 +709,16 @@ export function startSigninInbox(options) {
     return waiting;
   }
 
+  let beatAt = 0;
+  async function beat(fields) {
+    if (clock() - beatAt < 60_000 && !fields.reason) return;
+    beatAt = clock();
+    await writeSigninStatus(options.dataDir, fields, clock);
+  }
+
   async function pass() {
     if (stopped) return 0;
+    await beat({ state: 'on', reason: null, lastPass: pacificStamp(new Date(clock())).text });
     const info = await lstat(inbox).catch(() => undefined);
     if (!info?.isDirectory() || info.isSymbolicLink()) {
       watcher?.close();

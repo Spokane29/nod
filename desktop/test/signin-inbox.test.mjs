@@ -23,6 +23,8 @@ import {
   createGate,
   dialogTitle,
   recordsFolder,
+  statusFile,
+  writeSigninStatus,
   inboxLocationProblem,
   loadAllowList,
   outcomeConfirmed,
@@ -419,7 +421,8 @@ test('an accepted request posts only the allow-listed url and is filed once', as
   assert.equal(state.pending.cruisingpower.turnId, 'u1');
   await f.scan();
   assert.equal(f.calls.length, 1);
-  assert.deepEqual((await f.list()).sort(), ['accepted', 'accepted-log.txt']);
+  assert.deepEqual((await f.list()).sort(), ['accepted', 'accepted-log.txt', 'status.json']);
+  assert.equal(JSON.parse(await f.read('status.json')).state, 'on');
 });
 
 test('refused requests move to rejected with a one-line reason and never post', async (t) => {
@@ -462,7 +465,7 @@ test('odd entries are moved out of the way and never read or posted', async (t) 
     ['file has more than one link\n', 'file is quarantined\n', 'file too large\n'].sort(),
   );
   assert.equal((await f.read('log.txt')).match(/rejected not a regular file/g).length, 2);
-  assert.deepEqual((await f.list()).sort(), ['log.txt', 'rejected']);
+  assert.deepEqual((await f.list()).sort(), ['log.txt', 'rejected', 'status.json']);
   assert.deepEqual((await f.inboxList()).sort(), ['dir.json', 'notes.txt']);
   assert.ok((await f.list('rejected')).every((name) => !name.startsWith('dir')));
   await f.scan();
@@ -679,4 +682,31 @@ test('a missing inbox folder does not throw', async () => {
   await handle.scan();
   handle.stop();
   await rm(root, { recursive: true, force: true });
+});
+
+test('the inbox is never off in silence: a status file says why', async (t) => {
+  const dataDir = await directory();
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  const status = (fields) => writeSigninStatus(dataDir, fields);
+  const read = async () =>
+    JSON.parse(await readFile(join(dataDir, recordsFolder, statusFile), 'utf8'));
+  const notes = [];
+  await writeSigninStatus(dataDir, { state: 'starting', lastPass: null });
+  assert.equal((await read()).state, 'starting');
+  assert.equal(
+    await prepareSigninInbox({
+      environment: '',
+      setting: '',
+      dataDir,
+      status,
+      diagnostic: (line) => notes.push(line),
+      showDialog: async () => assert.fail('must not show a dialog'),
+    }),
+    undefined,
+  );
+  const off = await read();
+  assert.equal(off.state, 'off');
+  assert.match(off.reason, /no inbox folder is set/);
+  assert.match(notes[0], /Sign-in inbox is off: no inbox folder is set/);
+  assert.match(off.updatedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 });

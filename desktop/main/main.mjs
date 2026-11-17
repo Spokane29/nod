@@ -51,7 +51,7 @@ import { startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
 import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
-import { prepareSigninInbox, startSigninInbox } from './signin-inbox.mjs';
+import { prepareSigninInbox, startSigninInbox, writeSigninStatus } from './signin-inbox.mjs';
 
 trustSystemCertificates();
 
@@ -112,6 +112,15 @@ app.setPath(
   'userData',
   developmentDataRoot || join(app.getPath('appData'), testInstall ? 'nod Setup Test' : 'nod'),
 );
+void writeSigninStatus(app.getPath('userData'), {
+  state: 'starting',
+  reason: 'the app started; the engine is not ready yet',
+  appStartedAt: new Date().toLocaleString('en-CA', {
+    timeZone: 'America/Los_Angeles',
+    hour12: false,
+  }),
+  lastPass: null,
+});
 const profileRoot = join(app.getPath('userData'), 'profiles', 'local');
 const freshLocalProfile = await stat(profileRoot).then(
   () => false,
@@ -555,6 +564,7 @@ async function startSigninInboxFromSettings() {
         }
       : {}),
     diagnostic: (line) => void writeDiagnostic(line).catch(() => {}),
+    status: (fields) => writeSigninStatus(dataDir, fields),
   });
   if (!prepared || quitting) return;
   stopSigninInbox = startSigninInbox({
