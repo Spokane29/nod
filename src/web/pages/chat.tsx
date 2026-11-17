@@ -13,6 +13,7 @@ import type {
 } from '../../shared/contracts';
 import type { SuggestedTask, TaskSuggestions } from '../../shared/onboarding';
 import type { TrustView } from '../../shared/trust';
+import { appPages } from '../../shared/app-links';
 import type { QuestionAnswer } from '../../shared/answer-choices';
 import { integrationMetadata, integrationServices } from '../../shared/integrations';
 import { moreIdeasLine } from '../../shared/sender-apps';
@@ -131,21 +132,32 @@ function Working({
   writing?: boolean;
   quiet?: boolean;
 }) {
-  const found = writing ? undefined : items.find((item) => !item.background && !item.taskId);
+  const found = items.find((item) => !item.background && !item.taskId);
   const chat = found?.doing === 'queued' ? undefined : found;
-  const thinking = Boolean(found) || (sending && !writing);
+  const thinking = !writing && (Boolean(found) || sending);
   const receipt = items.some((item) => !item.background && item.received)
     ? 'Got your message. I’ll read it after this step.'
     : null;
-  if (!thinking && !label && !receipt) return null;
+  if (!thinking && !label && !receipt && !found) return null;
   return (
-    <div className="thinking" role="status">
+    <div className="thinking" hidden={!thinking && !label && !receipt}>
       <NodGlyph size={28} mode="thinking" />
       <div className="working-details">
-        <span className="working-text">
-          {thinking ? <LiveLine item={chat} quiet={quiet} /> : (label ?? receipt)}
-        </span>
-        {thinking && receipt && <span className="working-receipt">{receipt}</span>}
+        <div className="working-text">
+          <div hidden={!thinking}>
+            <LiveLine item={chat} quiet={quiet && thinking} />
+          </div>
+          {!thinking && (
+            <span className="live-line-current" role="status">
+              {label ?? receipt}
+            </span>
+          )}
+        </div>
+        {thinking && receipt && (
+          <span className="working-receipt" role="status">
+            {receipt}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -334,7 +346,7 @@ export function Chat({
           : 'Choose a model to start chatting'}
       </h2>
       <Button variant="outline" asChild>
-        <a href="/settings/models">Open Settings &gt; Models</a>
+        <a href="/settings/models">Open {appPages['/settings/models']}</a>
       </Button>
     </div>
   );
@@ -367,7 +379,7 @@ export function Chat({
   const [replyTo, setReplyTo] = useState<ComposerReply | null | undefined>(null);
   const [replyNotice, setReplyNotice] = useState('');
   const [unavailableQuestions, setUnavailableQuestions] = useState<ReadonlySet<string>>(new Set());
-  useEffect(() => setReplyNotice(''), [text, replyTo?.id]);
+  useEffect(() => setReplyNotice(''), [text, state.threadId]);
   const taskReply = useRef<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<{
     id: string;
@@ -2260,6 +2272,7 @@ export function Chat({
                           ...(task.kind
                             ? { kind: task.kind === 'ongoing' ? 'ongoing' : 'immediate' }
                             : {}),
+                          origin: task.origin === 'common' ? 'common' : 'learned',
                           position,
                         });
                         void send(task.title, [], null, 'task_card');
@@ -2471,6 +2484,41 @@ export function Chat({
               {replyNotice}
             </Notice>
           )}
+          {state.chatRecovery && (
+            <Notice kind="info">
+              <div className="chat-recovery">
+                <span>This chat needs a restart. Your messages, files and tasks stay.</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!connected || sending || Boolean(chatWork) || recovering}
+                  onClick={async () => {
+                    const expectedThread = threadId;
+                    setRecovering(true);
+                    setError('');
+                    try {
+                      await post('/api/conversation/restart-context', {
+                        threadId,
+                        turnId: state.chatRecovery!.turnId,
+                      });
+                      await refresh();
+                      if (threadRef.current === expectedThread) {
+                        setReplyTo(null);
+                        setReplyNotice('Chat restarted. Send your request again.');
+                        composer.current?.focus();
+                      }
+                    } catch (cause) {
+                      if (threadRef.current === expectedThread) setError(errorMessage(cause));
+                    } finally {
+                      setRecovering(false);
+                    }
+                  }}
+                >
+                  {recovering ? 'Restarting…' : 'Restart chat'}
+                </Button>
+              </div>
+            </Notice>
+          )}
           {error && <Notice>{error}</Notice>}
           {connectionNotice && (
             <Notice kind={connectionNotice.kind} onDismiss={() => setConnectionNotice(null)}>
@@ -2478,6 +2526,7 @@ export function Chat({
             </Notice>
           )}
           {state.configuration.llmReady &&
+            !state.chatRecovery &&
             (state.configuration.modelIssue ||
               (modelFailed && (failedRequest || state.configuration.modelAlternative))) && (
               <Notice kind="info">
@@ -2507,7 +2556,7 @@ export function Chat({
                       Try again
                     </Button>
                   )}
-                  <a href="/settings/models">Settings &gt; Models</a>
+                  <a href="/settings/models">{appPages['/settings/models']}</a>
                 </span>
               </Notice>
             )}
@@ -2532,7 +2581,7 @@ export function Chat({
               restoreReply={(saved) => {
                 if (!saved || !hiddenMessageIds.current.has(saved.id)) setReplyTo(saved);
               }}
-              ready={state.configuration.llmReady && !welcoming}
+              ready={state.configuration.llmReady && !welcoming && !recovering}
               busy={connected && working}
               text={text}
               setText={setText}

@@ -32,6 +32,7 @@ const nodActions: Array<[string, string]> = [
   ['NOD_browser', 'Continue in the browser'],
   ['NOD_vault_allow', 'Use a saved sign-in'],
   ['NOD_limits_update', 'Change spending limits'],
+  ['NOD_bug_report_send', 'Send a bug report to the Nod team'],
   ['NOD_model_select', 'Change the model'],
   ['NOD_notification_preferences_update', 'Change Nod settings'],
   ['NOD_schedule_pause', 'Pause a schedule'],
@@ -238,6 +239,7 @@ export function approvalContent(
 }
 
 const tools: Record<string, string> = {
+  codemode: 'Ran code',
   bash: 'Ran a command',
   read: 'Read a file',
   write: 'Wrote a file',
@@ -328,6 +330,8 @@ export function actionTarget(
   details?: Record<string, unknown>,
 ) {
   const target = (() => {
+    if (action === 'NOD_bug_report_send')
+      return args.includeReport === true ? 'with a diagnostic report' : 'summary only';
     if (action === 'NOD_browser') {
       const step = String(args.step ?? '');
       const control = Array.isArray(args.control)

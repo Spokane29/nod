@@ -24,9 +24,9 @@ import { integrationMetadata, integrationServiceIds } from '../shared/integratio
 import { untrustedBlock } from '../shared/untrusted.ts';
 import {
   DiscoveredConnectionError,
-  officialMcp,
   type createDiscoveredConnections,
 } from './discovered-connections.ts';
+import { bundledApps } from './app-catalog.ts';
 import { transaction } from './transaction.ts';
 import type { WorkAdmission } from './work-admission.ts';
 import type { SiteIcon } from '../ports/link-preview.ts';
@@ -297,6 +297,7 @@ function protectedCallback(row: Pick<ConnectionRow, 'callback_claim_id' | 'callb
 }
 
 export async function createIntegrations(pool: Pool, options: IntegrationOptions) {
+  const directApps = options.discovered?.apps ?? bundledApps;
   const mailCheck = options.mailCheck ?? noMailCheck;
   const configuredOwner = z.string().min(1).max(200).parse(options.ownerId);
   const provider = options.provider;
@@ -315,8 +316,18 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
       AnalyticsEvent,
       { event: 'connection_changed' }
     >['properties']['failure_reason'],
+    failure?: { step: string; error?: unknown },
   ) {
     captureConnection(options.analytics, connectionAnalytics(app), status, failureReason);
+    if (status === 'failed')
+      logFailure('app_connection_failed', failure?.error, {
+        app: slugSchema.safeParse(app).success ? app : 'custom',
+        step: failure?.step,
+        status: [Object(failure?.error).statusCode, Object(failure?.error).status].find(
+          (value) => Number.isInteger(value) && value >= 400 && value < 600,
+        ),
+        reason: failureReason,
+      });
   }
   function connectionFailure(error: unknown) {
     return serviceFailureReason(error);
@@ -327,6 +338,15 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     .parse(provider.id);
   let serviceCatalog: Map<string, IntegrationServiceInfo> | undefined;
   function serviceInfo(slug: string): IntegrationServiceInfo {
+    const direct = directApps.get(slug);
+    if (direct)
+      return {
+        slug,
+        name: direct.name,
+        description: direct.description,
+        categories: direct.categories,
+        ...(direct.icon ? { logoUrl: `/api/apps/catalog/${slug}/icon` } : {}),
+      };
     const info = serviceCatalog?.get(slug);
     return { slug, ...info, ...integrationMetadata(slug, info) };
   }
@@ -502,9 +522,9 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
   }
 
   async function catalog(): Promise<Connection[]> {
-    const services = await providerCatalog();
-    if (options.discovered && !services.has('notion'))
-      services.set('notion', serviceInfo('notion'));
+    const services = new Map(await providerCatalog());
+    if (options.discovered)
+      for (const slug of directApps.keys()) services.set(slug, serviceInfo(slug));
     return [...services.values()]
       .sort((left, right) => {
         const featured = (slug: string) => {
@@ -686,11 +706,12 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     const result: Connection[] = [];
     const services = new Set<string>([
       ...integrationServiceIds,
+      ...directApps.keys(),
       ...rows.filter((row) => row.account_id).map((row) => row.slug),
     ]);
     for (const slug of services) {
       const service = serviceInfo(slug);
-      if (officialMcp.has(slug)) {
+      if (directApps.has(slug)) {
         result.push({
           slug,
           name: service.name,
@@ -1029,7 +1050,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
         ...(returnTo === 'window' || returnTo === 'desktop' ? { attempt: nonce } : {}),
       };
     } catch (error) {
-      track(slug, 'failed', connectionFailure(error));
+      track(slug, 'failed', connectionFailure(error), { step: 'start', error });
       throw error;
     } finally {
       if (session) provider.deleteSession(session.id).catch(() => {});
@@ -1082,7 +1103,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     let abandoned = (await options.discovered?.abandonSetup(linkHash, reason)) ?? false;
     for (const row of rows)
       if ((await clearReconnect(row.id, row.callback_hash!)) !== undefined) {
-        track(row.slug, 'failed', reason);
+        track(row.slug, 'failed', reason, { step: 'sign_in' });
         abandoned = true;
       }
     return abandoned;
@@ -1206,7 +1227,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
     } catch (error) {
       const cleared = await clearReconnect(row.id, hash);
       if (attemptedId && cleared !== attemptedId) await discardReconnect(row, attemptedId);
-      track(slug, 'failed', connectionFailure(error));
+      track(slug, 'failed', connectionFailure(error), { step: 'reconnect', error });
       throw error;
     }
   }
@@ -1693,7 +1714,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
               Object.entries(found.tools as Record<string, unknown>).filter(([action]) => {
                 const slug = matchingService(action, services);
                 return (
-                  !(slug && officialMcp.has(slug)) &&
+                  !(slug && directApps.has(slug)) &&
                   slug !== retiredNotionMcp &&
                   (!connectionId || rows.some((row) => row.slug === slug))
                 );
@@ -2600,6 +2621,20 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
           apps,
         } satisfies AppSetupStatus);
       });
+      scope.get<{ Params: { slug: string } }>(
+        '/api/apps/catalog/:slug/icon',
+        async (request, reply) => {
+          const value = directApps.get(request.params.slug)?.icon;
+          if (!value) return reply.code(404).send({ error: 'The app icon is unavailable.' });
+          return reply
+            .header('Content-Type', value.mimeType)
+            .header('X-Content-Type-Options', 'nosniff')
+            .header('Content-Security-Policy', "default-src 'none'; sandbox")
+            .header('Cross-Origin-Resource-Policy', 'same-origin')
+            .header('Cache-Control', 'private, max-age=300')
+            .send(Buffer.from(value.bytes));
+        },
+      );
       scope.get<{ Params: { id: string } }>('/api/apps/:id/icon', async (request, reply) => {
         const value = await icon(request.params.id);
         if (!value) return reply.code(404).send({ error: 'The app icon is unavailable.' });
@@ -2652,7 +2687,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
         const service = request.params.slug === retiredNotionMcp ? 'notion' : request.params.slug;
         if (request.params.slug === retiredNotionMcp && input.connectionId)
           throw new IntegrationError(retiredNotionMessage, 409);
-        if (officialMcp.has(service)) {
+        if (directApps.has(service)) {
           if (!options.discovered)
             throw new IntegrationError('Discovered connections are unavailable.', 503);
           const selected = (await options.discovered.list()).find(
@@ -2763,10 +2798,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
                   if (result.success && result.accountId !== pending)
                     await discardReconnect(row, result.accountId);
                 } catch {}
-            } else if (
-              row.callback_expires &&
-              new Date(row.callback_expires).getTime() > Date.now()
-            ) {
+            } else {
               const claimId = randomBytes(32).toString('base64url');
               const claimed = (
                 await pool.query<ConnectionRow>(
@@ -2790,23 +2822,27 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
                   if (!result.success) {
                     outcome = 'cancelled';
                     await clearReconnect(claimed.id, hash, claimId);
-                    track(claimed.slug, 'failed', 'cancelled');
+                    track(claimed.slug, 'failed', 'cancelled', { step: 'callback' });
                   } else {
                     const resumed = await completeConnection(result, claimed, (id) => {
                       verifiedAccountId = id;
                     });
                     outcome = resumed ? 'continued' : 'connected';
                   }
-                } catch {
+                } catch (error) {
                   outcome = 'failed';
-                  track(claimed.slug, 'failed', 'verification_failed');
+                  track(claimed.slug, 'failed', 'verification_failed', {
+                    step: 'callback',
+                    error,
+                  });
                   await clearReconnect(claimed.id, hash, claimId);
                   if (verifiedAccountId) await discardReconnect(claimed, verifiedAccountId);
                 } finally {
                   activeCallbackClaims.delete(claimId);
                 }
-              }
-            } else if (!row.callback_claim_id) await clearReconnect(row.id, hash);
+              } else if ((await clearReconnect(row.id, hash, undefined, true)) !== undefined)
+                track(row.slug, 'failed', 'timeout', { step: 'callback' });
+            }
           } else if (options.discovered) {
             const result = await options.discovered
               .completeOAuth(request.query)
@@ -3051,7 +3087,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
       const slug = slugSchema.parse(service === retiredNotionMcp ? 'notion' : service);
       if (service === retiredNotionMcp && connectionId)
         throw new IntegrationError(retiredNotionMessage, 409);
-      if (officialMcp.has(slug)) {
+      if (directApps.has(slug)) {
         if (!options.discovered)
           throw new IntegrationError('Discovered connections are unavailable.', 503);
         const accounts = (await options.discovered.list())

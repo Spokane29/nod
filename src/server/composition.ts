@@ -86,9 +86,11 @@ import {
   createDiscoveredTransport,
   ownerAddress,
   ownerFetch,
+  publicHttps,
 } from '../providers/discovered/remote.ts';
 import { createDiscoveredOAuth } from '../providers/discovered/oauth.ts';
 import { createDiscoveredConnections } from './discovered-connections.ts';
+import { bundledApps } from './app-catalog.ts';
 import { createLocalFiles, isLocalFilesAction } from './local-files.ts';
 import { createAppGrantVault } from './vault-app-grants.ts';
 import { createDockerWorkspace } from '../providers/docker/index.ts';
@@ -188,6 +190,7 @@ import {
   createUserMessageService,
   enqueueTurn,
   initializeThreads,
+  insertBugReportDraft,
   lockThread,
   reactToAssistantMessage,
   resumeAfterConnection,
@@ -216,6 +219,7 @@ import { createVaultAccess } from './vault-access.ts';
 import { createPayments } from './payments.ts';
 import { BrowserConnectionError, createBrowserConnections } from './browser-connections.ts';
 import { cachedIcons, registerLinkOpened } from './link-previews.ts';
+import { appPages } from '../shared/app-links.ts';
 export interface ApplicationAdapters {
   analytics?: ProductAnalytics;
   onboardingEmail?: OnboardingEmailDelivery;
@@ -666,6 +670,8 @@ export function createDefaultAdapters(
             mode,
             allowedNumber: configured.WHATSAPP_ALLOWED_NUMBER,
             store: createChannelSessionStore({ pool, ownerId, keyStore }),
+            onDrop: (drop) =>
+              logFailure('channel_message_dropped', null, { provider: 'whatsapp', ...drop }),
           }),
         );
       },
@@ -722,10 +728,11 @@ export async function createApplication(
 ) {
   const diagnostics: {
     log?: Awaited<ReturnType<typeof createFeedbackLog>>;
+    failures?: Awaited<ReturnType<typeof createFeedbackLog>>;
     failure: FailureLogSink;
   } = {
     failure: (event, error, context) =>
-      diagnostics.log?.record('failure', { event, error, context }, context),
+      diagnostics.failures?.record('failure', { event, error, context }, context),
   };
   try {
     return await withFailureLog(diagnostics.failure, () =>
@@ -733,6 +740,7 @@ export async function createApplication(
     );
   } catch (error) {
     await diagnostics.log?.close().catch(() => {});
+    await diagnostics.failures?.close().catch(() => {});
     try {
       await adapters.analytics?.shutdown();
     } catch {}
@@ -751,7 +759,11 @@ async function initializeApplication(
     heartbeat?: boolean;
     runtimeReady?: Promise<void>;
   },
-  diagnostics: { log?: Awaited<ReturnType<typeof createFeedbackLog>>; failure: FailureLogSink },
+  diagnostics: {
+    log?: Awaited<ReturnType<typeof createFeedbackLog>>;
+    failures?: Awaited<ReturnType<typeof createFeedbackLog>>;
+    failure: FailureLogSink;
+  },
 ) {
   const analytics = await createAnalytics({
     provider: adapters.analytics,
@@ -906,7 +918,10 @@ async function initializeApplication(
   };
   const mailCheck = createMailCheck({ curator, decisions });
   const skillLibrary = createSkillLibrary(
-    fileURLToPath(new URL('../runtime/skills/', import.meta.url)),
+    [
+      fileURLToPath(new URL('../runtime/skills/', import.meta.url)),
+      ...[...bundledApps.values()].flatMap((app) => (app.skills ? [app.skills] : [])),
+    ],
     coreSkills,
   );
   const analyzeImages =
@@ -1225,27 +1240,8 @@ async function initializeApplication(
     ownerId,
     keyStore: adapters.keyStore,
   });
-  const discovered = await createDiscoveredConnections(pool, {
-    analytics: captureAnalytics,
-    analyticsConsent,
-    ownerId,
-    baseUrl: publicOrigin,
-    grantVault,
-    transport: createDiscoveredTransport(),
-    oauth: createDiscoveredOAuth(),
-    local: (origin) => {
-      const fetch = ownerFetch(origin);
-      const check = ownerAddress(origin);
-      return {
-        transport: createDiscoveredTransport(fetch, async (endpoint) => {
-          const { url } = await check(endpoint);
-          if (url.hash || url.search) throw new Error('Use an address without a query.');
-          return url.href;
-        }),
-        oauth: createDiscoveredOAuth(fetch, async (link) => (await check(link)).url.href),
-      };
-    },
-    runCli: workspace.connectedCliAvailable
+  const runConnectedCli: Parameters<typeof createDiscoveredConnections>[1]['runCli'] =
+    workspace.connectedCliAvailable
       ? async (threadId, cli, args, environment, timeoutSeconds, signal) => {
           const session = workspace.open({
             threadId,
@@ -1255,6 +1251,41 @@ async function initializeApplication(
           if (!session.runConnectedCli) throw new Error('Connected CLI commands are unavailable.');
           return session.runConnectedCli(cli, args, environment, timeoutSeconds);
         }
+      : undefined;
+  const discovered = await createDiscoveredConnections(pool, {
+    analytics: captureAnalytics,
+    analyticsConsent,
+    ownerId,
+    baseUrl: publicOrigin,
+    grantVault,
+    transport: createDiscoveredTransport(),
+    oauth: createDiscoveredOAuth(),
+    local: (origin) => {
+      const check = ownerAddress(origin);
+      const signIn = ownerAddress(origin, publicHttps);
+      return {
+        transport: createDiscoveredTransport(ownerFetch(origin), async (endpoint) => {
+          const { url } = await check(endpoint);
+          if (url.hash || url.search) throw new Error('Use an address without a query.');
+          return url.href;
+        }),
+        oauth: createDiscoveredOAuth(
+          ownerFetch(origin, publicHttps),
+          async (link) => (await signIn(link)).url.href,
+        ),
+      };
+    },
+    runCli: runConnectedCli,
+    verifyCli: runConnectedCli
+      ? async (cli, args, environment, timeoutSeconds, signal) =>
+          runConnectedCli(
+            (await activeThread(pool, ownerId)).id,
+            cli,
+            args,
+            environment,
+            timeoutSeconds,
+            signal,
+          )
       : undefined,
     resumeConnection: resumeAfterConnection,
     refresh,
@@ -1271,17 +1302,26 @@ async function initializeApplication(
     trash: adapters.trash,
     available: Boolean(adapters.trash),
   });
-  const preparationPaused = async () => {
+  const preparationBlocked = async () => {
+    if ((await ledger.preparationLimit()).reached)
+      return 'the monthly preparation allowance is reached';
+    const unpriced = adapters.models?.unpricedPreparationModel();
+    if (unpriced) return `${unpriced} has no price, so the preparation allowance cannot bound it`;
+  };
+  const preparationPause = async () => {
     const prefs = await speechPreferences.get();
-    return prefs.proactivePaused || isQuietTime(prefs) || (await ledger.preparationLimit()).reached;
+    if (prefs.proactivePaused) return 'automatic preparation is paused';
+    if (isQuietTime(prefs)) return 'it is quiet hours';
+    return preparationBlocked();
   };
   const integrations = await createIntegrations(pool, {
     localFiles,
     mailCheck: async (...args) => {
-      if (await preparationPaused()) return args[0].map(() => undefined);
+      const pause = await preparationPause();
+      if (pause) return args[0].map(() => `background email checks wait because ${pause}`);
       return ledger.withPreparation(randomUUID(), () => mailCheck(...args));
     },
-    paused: preparationPaused,
+    paused: async () => Boolean(await preparationPause()),
     analytics: captureAnalytics,
     analyticsConsent,
     admission,
@@ -1457,6 +1497,14 @@ async function initializeApplication(
       throw error;
     }
   };
+  let feedbackDrafts: Awaited<ReturnType<typeof registerFeedback>> | undefined;
+  const readyDrafts = () => {
+    if (!feedbackDrafts)
+      throw Object.assign(new Error('Bug reports are still starting. Try again in a moment.'), {
+        notRun: true,
+      });
+    return feedbackDrafts;
+  };
   const approvals = await createApprovals(
     async (action, args, provenance) => {
       if (
@@ -1492,193 +1540,201 @@ async function initializeApplication(
         ? replayBrowserStep(args, provenance)
         : action === 'NOD_vault_allow'
           ? vaultAccess.allow(args)
-          : action === 'NOD_limits_update'
-            ? withTurnLock(turnLock, (client) => ledger.setLimits(args, 'agent', client))
-            : scheduleWrite
-              ? transaction(
-                  async (client) => {
-                    if ((await lockThread(client)).id !== provenance.threadId)
-                      throw Object.assign(
-                        new Error('The instruction conversation is no longer active.'),
-                        { notRun: true },
-                      );
-                    return withTurnLock(
-                      turnLock,
-                      (locked) =>
-                        personal.manage(action.slice('NOD_'.length), args, provenance, {
-                          client: locked,
-                        }),
-                      client,
-                    );
-                  },
-                  pool,
-                  provenance.signal,
-                )
-              : lockedWrite
-                ? withTurnLock(turnLock, (client) =>
-                    personal.manage(action.slice('NOD_'.length), args, provenance, {
-                      client,
-                      ...(provenance.details?.currentNotificationRule === undefined
-                        ? {}
-                        : {
-                            expectedNotificationRule: String(
-                              provenance.details.currentNotificationRule,
-                            ),
+          : action === 'NOD_bug_report_send'
+            ? readyDrafts().sendDraft(
+                String(args.draftId),
+                null,
+                () => provenance.signal?.aborted === true,
+              )
+            : action === 'NOD_limits_update'
+              ? withTurnLock(turnLock, (client) => ledger.setLimits(args, 'agent', client))
+              : scheduleWrite
+                ? transaction(
+                    async (client) => {
+                      if ((await lockThread(client)).id !== provenance.threadId)
+                        throw Object.assign(
+                          new Error('The instruction conversation is no longer active.'),
+                          { notRun: true },
+                        );
+                      return withTurnLock(
+                        turnLock,
+                        (locked) =>
+                          personal.manage(action.slice('NOD_'.length), args, provenance, {
+                            client: locked,
                           }),
-                      ...(provenance.details?.currentRules === undefined
-                        ? {}
-                        : { expectedRules: String(provenance.details.currentRules) }),
-                    }),
+                        client,
+                      );
+                    },
+                    pool,
+                    provenance.signal,
                   )
-                : action.startsWith('NOD_')
-                  ? personal.manage(action.slice('NOD_'.length), args, provenance)
-                  : (async () => {
-                      integrations.serviceWait('action', action);
-                      const savedBinding = provenance.details?.verifiedBinding;
-                      const verifiedBinding =
-                        typeof savedBinding === 'string' ? savedBinding : undefined;
-                      if (action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT') {
-                        const currentBinding = await integrations
-                          .binding(String(args.connectionId ?? ''))
-                          .catch((error: unknown) => {
-                            throw Object.assign(
-                              new Error(
-                                `Nod could not check the selected Gmail account for deletion: ${safeIntegrationFailure(error)}`,
+                : lockedWrite
+                  ? withTurnLock(turnLock, (client) =>
+                      personal.manage(action.slice('NOD_'.length), args, provenance, {
+                        client,
+                        ...(provenance.details?.currentNotificationRule === undefined
+                          ? {}
+                          : {
+                              expectedNotificationRule: String(
+                                provenance.details.currentNotificationRule,
                               ),
+                            }),
+                        ...(provenance.details?.currentRules === undefined
+                          ? {}
+                          : { expectedRules: String(provenance.details.currentRules) }),
+                      }),
+                    )
+                  : action.startsWith('NOD_')
+                    ? personal.manage(action.slice('NOD_'.length), args, provenance)
+                    : (async () => {
+                        integrations.serviceWait('action', action);
+                        const savedBinding = provenance.details?.verifiedBinding;
+                        const verifiedBinding =
+                          typeof savedBinding === 'string' ? savedBinding : undefined;
+                        if (action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT') {
+                          const currentBinding = await integrations
+                            .binding(String(args.connectionId ?? ''))
+                            .catch((error: unknown) => {
+                              throw Object.assign(
+                                new Error(
+                                  `Nod could not check the selected Gmail account for deletion: ${safeIntegrationFailure(error)}`,
+                                ),
+                                { notRun: true },
+                              );
+                            });
+                          if (!verifiedBinding || currentBinding !== verifiedBinding)
+                            throw Object.assign(
+                              new Error('The selected Gmail account changed after confirmation.'),
                               { notRun: true },
                             );
-                          });
-                        if (!verifiedBinding || currentBinding !== verifiedBinding)
-                          throw Object.assign(
-                            new Error('The selected Gmail account changed after confirmation.'),
-                            { notRun: true },
-                          );
-                        if (action === 'GMAIL_DELETE_DRAFT') {
-                          const draftId = args.draft_id;
-                          const savedMessageId = provenance.details?.verifiedDraftMessageId;
-                          if (
-                            typeof draftId !== 'string' ||
-                            !draftId.trim() ||
-                            typeof savedMessageId !== 'string' ||
-                            !savedMessageId.trim()
-                          )
-                            throw Object.assign(
-                              new Error(
-                                'The Gmail draft confirmation is missing its verified target.',
-                              ),
-                              { notRun: true },
-                            );
-                          const readArgs = {
-                            connectionId: args.connectionId,
-                            draft_id: draftId,
-                            format: 'metadata',
-                            ...(typeof args.user_id === 'string' ? { user_id: args.user_id } : {}),
-                          };
-                          const readVerdict = await trust
-                            .check(
-                              { threadId: provenance.threadId, turnId: provenance.turnId },
-                              'GMAIL_GET_DRAFT',
-                              readArgs,
-                              provenance.signal,
+                          if (action === 'GMAIL_DELETE_DRAFT') {
+                            const draftId = args.draft_id;
+                            const savedMessageId = provenance.details?.verifiedDraftMessageId;
+                            if (
+                              typeof draftId !== 'string' ||
+                              !draftId.trim() ||
+                              typeof savedMessageId !== 'string' ||
+                              !savedMessageId.trim()
                             )
-                            .catch((error: unknown) => {
                               throw Object.assign(
                                 new Error(
-                                  `Nod could not recheck permission to read the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
+                                  'The Gmail draft confirmation is missing its verified target.',
                                 ),
                                 { notRun: true },
                               );
-                            });
-                          if (readVerdict.confirm)
-                            throw Object.assign(
-                              new Error(
-                                'Nod could not authorize a fresh Gmail draft read before deletion.',
-                              ),
-                              { notRun: true },
-                            );
-                          const current = await integrations
-                            .execute(
-                              ownerId,
-                              'GMAIL_GET_DRAFT',
-                              readArgs,
-                              { threadId: provenance.threadId, turnId: provenance.turnId },
-                              provenance.signal,
-                              verifiedBinding,
-                              'read',
-                            )
-                            .catch((error: unknown) => {
+                            const readArgs = {
+                              connectionId: args.connectionId,
+                              draft_id: draftId,
+                              format: 'metadata',
+                              ...(typeof args.user_id === 'string'
+                                ? { user_id: args.user_id }
+                                : {}),
+                            };
+                            const readVerdict = await trust
+                              .check(
+                                { threadId: provenance.threadId, turnId: provenance.turnId },
+                                'GMAIL_GET_DRAFT',
+                                readArgs,
+                                provenance.signal,
+                              )
+                              .catch((error: unknown) => {
+                                throw Object.assign(
+                                  new Error(
+                                    `Nod could not recheck permission to read the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
+                                  ),
+                                  { notRun: true },
+                                );
+                              });
+                            if (readVerdict.confirm)
                               throw Object.assign(
                                 new Error(
-                                  `Nod could not recheck the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
+                                  'Nod could not authorize a fresh Gmail draft read before deletion.',
                                 ),
                                 { notRun: true },
                               );
-                            });
-                          await ledger
-                            .action(provenance.turnId, 'GMAIL_GET_DRAFT', readVerdict.basis)
-                            .catch((error: unknown) => {
+                            const current = await integrations
+                              .execute(
+                                ownerId,
+                                'GMAIL_GET_DRAFT',
+                                readArgs,
+                                { threadId: provenance.threadId, turnId: provenance.turnId },
+                                provenance.signal,
+                                verifiedBinding,
+                                'read',
+                              )
+                              .catch((error: unknown) => {
+                                throw Object.assign(
+                                  new Error(
+                                    `Nod could not recheck the Gmail draft before deletion: ${safeIntegrationFailure(error)}`,
+                                  ),
+                                  { notRun: true },
+                                );
+                              });
+                            await ledger
+                              .action(provenance.turnId, 'GMAIL_GET_DRAFT', readVerdict.basis)
+                              .catch((error: unknown) => {
+                                throw Object.assign(
+                                  new Error(
+                                    `Nod could not record the Gmail draft read before deletion: ${safeIntegrationFailure(error)}`,
+                                  ),
+                                  { notRun: true },
+                                );
+                              });
+                            const currentTarget = gmailDraftTarget(current, draftId);
+                            if (!currentTarget)
                               throw Object.assign(
                                 new Error(
-                                  `Nod could not record the Gmail draft read before deletion: ${safeIntegrationFailure(error)}`,
+                                  'Nod could not verify the Gmail draft before deletion. Ask again before deleting it.',
                                 ),
                                 { notRun: true },
                               );
-                            });
-                          const currentTarget = gmailDraftTarget(current, draftId);
-                          if (!currentTarget)
-                            throw Object.assign(
-                              new Error(
-                                'Nod could not verify the Gmail draft before deletion. Ask again before deleting it.',
-                              ),
-                              { notRun: true },
-                            );
-                          if (currentTarget.messageId !== savedMessageId)
-                            throw Object.assign(
-                              new Error(
-                                'The Gmail draft changed after confirmation. Ask again before deleting it.',
-                              ),
-                              { notRun: true },
-                            );
+                            if (currentTarget.messageId !== savedMessageId)
+                              throw Object.assign(
+                                new Error(
+                                  'The Gmail draft changed after confirmation. Ask again before deleting it.',
+                                ),
+                                { notRun: true },
+                              );
+                          }
                         }
-                      }
-                      const turn = { threadId: provenance.threadId, turnId: provenance.turnId };
-                      const ready = hasWorkspaceFiles(args)
-                        ? await integrations
-                            .prepare(ownerId, action, args, turn, provenance.signal)
-                            .catch((error: unknown) => {
-                              throw Object.assign(
-                                error instanceof Error ? error : new Error(String(error)),
-                                { notRun: true },
-                              );
+                        const turn = { threadId: provenance.threadId, turnId: provenance.turnId };
+                        const ready = hasWorkspaceFiles(args)
+                          ? await integrations
+                              .prepare(ownerId, action, args, turn, provenance.signal)
+                              .catch((error: unknown) => {
+                                throw Object.assign(
+                                  error instanceof Error ? error : new Error(String(error)),
+                                  { notRun: true },
+                                );
+                              })
+                          : args;
+                        const result = await integrations.executeApproved(
+                          ownerId,
+                          action,
+                          ready,
+                          turn,
+                          provenance.signal,
+                          action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT'
+                            ? verifiedBinding
+                            : undefined,
+                        );
+                        await ledger.action(
+                          provenance.turnId,
+                          action,
+                          provenance.basis ?? { kind: 'approved' },
+                          actionTarget(action, args, provenance.details),
+                        );
+                        return privateEmailResult(
+                          (
+                            await saveIntegrationFiles(result, async (file) => {
+                              const name = `${randomUUID()}-${basename(file.name)}`;
+                              await workspace.writeArtifact(provenance.threadId, name, file.bytes);
+                              return name;
                             })
-                        : args;
-                      const result = await integrations.executeApproved(
-                        ownerId,
-                        action,
-                        ready,
-                        turn,
-                        provenance.signal,
-                        action === 'GMAIL_DELETE_MESSAGE' || action === 'GMAIL_DELETE_DRAFT'
-                          ? verifiedBinding
-                          : undefined,
-                      );
-                      await ledger.action(
-                        provenance.turnId,
-                        action,
-                        provenance.basis ?? { kind: 'approved' },
-                        actionTarget(action, args, provenance.details),
-                      );
-                      return privateEmailResult(
-                        (
-                          await saveIntegrationFiles(result, async (file) => {
-                            const name = `${randomUUID()}-${basename(file.name)}`;
-                            await workspace.writeArtifact(provenance.threadId, name, file.bytes);
-                            return name;
-                          })
-                        ).value,
-                        mailCheck,
-                      );
-                    })());
+                          ).value,
+                          mailCheck,
+                        );
+                      })());
       if (action.startsWith('NOD_') && action !== 'NOD_vault_allow')
         await ledger.action(
           provenance.turnId,
@@ -1689,7 +1745,7 @@ async function initializeApplication(
       return result;
     },
     async (action, args, expectedRevision, client) => {
-      if (['NOD_browser', 'NOD_vault_allow'].includes(action)) return;
+      if (['NOD_browser', 'NOD_vault_allow', 'NOD_bug_report_send'].includes(action)) return;
       if (action === 'NOD_limits_update') limitsInput.parse(args);
       else if (action.startsWith('NOD_')) {
         if (
@@ -1856,29 +1912,32 @@ async function initializeApplication(
       }
     | undefined;
   const feedbackSecrets = [ownerId, ...secrets];
-  diagnostics.log = await createFeedbackLog({
+  const sanitizeDiagnostics = async (value: unknown) => {
+    const profile = await (feedbackProfileRead ??= ownerProfile().finally(() => {
+      feedbackProfileRead = undefined;
+    }));
+    for (let index = feedbackSecrets.length - 1; index < secrets.length; index++)
+      feedbackSecrets.push(secrets[index]);
+    if (
+      !feedbackRedaction ||
+      feedbackRedaction.profile.region !== profile.region ||
+      feedbackRedaction.profile.names.length !== profile.names.length ||
+      feedbackRedaction.profile.names.some((name, index) => name !== profile.names[index])
+    )
+      feedbackRedaction = {
+        profile,
+        redact: createFeedbackRedactor({ secrets: feedbackSecrets, profile }),
+      };
+    const { redact } = feedbackRedaction;
+    if (!redact.isReady()) throw new Error('Diagnostic redaction unavailable.');
+    return redact.value(value);
+  };
+  diagnostics.log = await createFeedbackLog({ dataRoot, ownerId, sanitize: sanitizeDiagnostics });
+  diagnostics.failures = await createFeedbackLog({
     dataRoot,
     ownerId,
-    sanitize: async (value) => {
-      const profile = await (feedbackProfileRead ??= ownerProfile().finally(() => {
-        feedbackProfileRead = undefined;
-      }));
-      for (let index = feedbackSecrets.length - 1; index < secrets.length; index++)
-        feedbackSecrets.push(secrets[index]);
-      if (
-        !feedbackRedaction ||
-        feedbackRedaction.profile.region !== profile.region ||
-        feedbackRedaction.profile.names.length !== profile.names.length ||
-        feedbackRedaction.profile.names.some((name, index) => name !== profile.names[index])
-      )
-        feedbackRedaction = {
-          profile,
-          redact: createFeedbackRedactor({ secrets: feedbackSecrets, profile }),
-        };
-      const { redact } = feedbackRedaction;
-      if (!redact.isReady()) throw new Error('Diagnostic redaction unavailable.');
-      return redact.value(value);
-    },
+    name: 'failures',
+    sanitize: sanitizeDiagnostics,
   });
   adapters.traces?.configure({
     enabled: (await localAccounts.read(ownerId)).traces,
@@ -1988,7 +2047,7 @@ async function initializeApplication(
     curator: adapters.classificationCurator && ledger.curator(adapters.classificationCurator),
     analytics: captureAnalytics,
     modelAvailable: async () =>
-      !(await ledger.preparationLimit()).reached &&
+      !(await preparationBlocked()) &&
       (adapters.models
         ? await adapters.models.automaticRequestsAllowed({ kind: 'background' }, true)
         : adapters.model.configured),
@@ -2116,7 +2175,7 @@ async function initializeApplication(
       modelAlternative: () => {
         const other = alternativeModel(adapters.models);
         return other
-          ? `Your ${other.label} connection is also set up: you can switch to it in Settings > Models.`
+          ? `Your ${other.label} connection is also set up: you can switch to it in ${appPages['/settings/models']}.`
           : undefined;
       },
       taskClassification: true,
@@ -2364,6 +2423,36 @@ async function initializeApplication(
         if (action === 'prepared_update') {
           const { id, state, snoozedUntil, feedback } = await proactivity.control(args, turn);
           return { id, state, snoozedUntil, feedback };
+        }
+        if (action === 'bug_report_draft' || action === 'bug_report_send') {
+          if (!readyDrafts().configured)
+            return 'Bug reports cannot be sent from this Nod. Describe the problem in your reply instead.';
+        }
+        if (action === 'bug_report_draft') {
+          const { summary } = z.object({ summary: z.string().trim().min(1).max(4000) }).parse(args);
+          await withTurnLock(turn.turnId, (client) =>
+            insertBugReportDraft(client, turn, '', summary),
+          );
+          refresh();
+          return 'The owner now sees this bug report with a Send report button, or can reply "send" in a chat app. Do not repeat the summary.';
+        }
+        if (action === 'bug_report_send') {
+          const draft = await readyDrafts().draftFor(turn.threadId, provenance.sourceMessageId);
+          if (!draft)
+            throw new Error(
+              'No unsent bug report is waiting in this conversation. Draft one with bug_report_draft first.',
+            );
+          if (draft.sent) return { status: 'already_sent', receipt: draft.sent };
+          const input = { draftId: draft.id, summary: draft.summary };
+          const verdict = await trust.check(turn, 'NOD_bug_report_send', input);
+          return approvals.request(turn, 'NOD_bug_report_send', input, {
+            ...provenance,
+            allowed: !verdict.confirm,
+            ...(verdict.confirm ? {} : { basis: verdict.basis }),
+            expectedChatRevision: verdict.chatRevision,
+            admit,
+            details: verdict.confirm ? { reason: verdict.reason } : {},
+          });
         }
         if (action === 'limits_update') {
           const input = limitsInput.parse(args);
@@ -2827,6 +2916,9 @@ async function initializeApplication(
     secrets,
     profile: ownerProfile,
     logs: () => diagnostics.log!.snapshot(),
+    failures: () => diagnostics.failures!.snapshot(),
+    dataRoot,
+    trustModel: adapters.trustModel ?? 'selected',
     context: await feedbackContext({ environment: process.env }),
     get provider() {
       return adapters.model.provider;
@@ -2835,7 +2927,7 @@ async function initializeApplication(
       return adapters.model.name;
     },
   };
-  await registerFeedback(app, {
+  feedbackDrafts = await registerFeedback(app, {
     pool,
     ownerId,
     context: feedbackReportOptions.context!,
@@ -2845,11 +2937,12 @@ async function initializeApplication(
       submit: async (input) => ({ submissionId: input.submissionId, status: 'rejected' }),
       status: async (submissionId) => ({ submissionId, status: 'rejected' }),
     },
-    buildReport: (activity, errors, errorsAvailable) =>
+    buildReport: (activity, errors, errorsAvailable, client) =>
       buildFeedbackReport({
         ...feedbackReportOptions,
         errors,
         errorsAvailable,
+        client,
         activity: [...feedbackActivity.snapshot(), ...activity].sort((a, b) => b.ageMs - a.ageMs),
       }),
     analytics: captureAnalytics,
@@ -2859,7 +2952,6 @@ async function initializeApplication(
     analytics,
     model: () => adapters.model,
     accounts: localAccounts,
-    origin: publicOrigin,
     localUser: { id: ownerId, name: 'You', email: null, avatarUrl: null },
     developerIds: desktopMode ? new Set() : new Set([ownerId]),
     start: welcome,
@@ -3099,6 +3191,7 @@ async function initializeApplication(
       () => analytics.shutdown(),
       () => adapters.telemetry?.shutdown(),
       () => diagnostics.log?.close(),
+      () => diagnostics.failures?.close(),
     ]) {
       try {
         await close();

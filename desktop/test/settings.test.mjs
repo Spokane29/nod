@@ -25,7 +25,7 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { createServer as createHttpsServer } from 'node:https';
 import { createServer } from 'node:net';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { getCACertificates, setDefaultCACertificates } from 'node:tls';
@@ -621,6 +621,8 @@ async function runningDesktop(
       argv,
       env: typeof environment === 'function' ? environment(dirname(storage.path)) : environment,
       resourcesPath: dirname(storage.path),
+      versions: { electron: '0.0.0' },
+      getSystemVersion: () => '0.0.0',
     },
     ipcMain: ipc,
     autoUpdater: Object.assign(new EventEmitter(), {
@@ -661,6 +663,7 @@ async function runningDesktop(
     resolve,
     fileURLToPath,
     pathToFileURL,
+    homedir,
     mkdir,
     appendFile,
     readFile: (file, ...args) =>
@@ -838,6 +841,9 @@ async function runningDesktop(
       }
       isMinimized() {
         return this.minimized === true;
+      }
+      setProgressBar(value) {
+        this.progress = value;
       }
       isMaximized() {
         return this.maximized === true;
@@ -1236,6 +1242,149 @@ test('opting out on Welcome stops later startup path events', async (t) => {
   }
 });
 
+test('native local setup observes early runtime failure and recovery without private details', async (t) => {
+  let attempts = 0;
+  const privateText = 'private-setup-detail /Users/synthetic/private-folder';
+  const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+    initialState: 'fresh',
+    allowStart: true,
+    packaged: true,
+    buildMetadata: { release: true },
+    version: '0.1.17',
+    prepareRuntime: async ({ onStatus, onStorageReady }) => {
+      onStatus({ stage: privateText, message: privateText, progress: 0.1 });
+      if (++attempts === 1) throw new Error(privateText);
+      onStatus({ stage: privateText, message: privateText, progress: 0.2 });
+      const runtime = { env: {} };
+      await onStorageReady(runtime);
+      return runtime;
+    },
+  });
+  try {
+    await f.launch();
+    await f.nativeOpening();
+    const setup = f.windows[0];
+    const event = { sender: setup.webContents, senderFrame: setup.webContents.mainFrame };
+    await f.handlers.get('nod:warmup')(event);
+    await waitFor(() => assert.equal(f.status().runtime.phase, 'error'), {
+      attempts: 40,
+      interval: 10,
+    });
+    const observations = () =>
+      f.nativeAnalytics.filter((item) => item.event === 'local_setup_observed');
+    assert.equal(observations().length, 0);
+    await f.handlers.get('nod:settings:save')(event, {
+      welcome: { usageData: true, continued: false },
+    });
+    await waitFor(() => assert.equal(observations().length, 1), {
+      attempts: 40,
+      interval: 10,
+    });
+    assert.equal(observations()[0].properties.runtime_status, 'failed');
+    assert.equal(observations()[0].properties.startup_status, 'idle');
+    assert.equal(observations()[0].properties.setup_available, false);
+    await f.handlers.get('nod:prepare')(event, { retry: true });
+    assert.equal(f.status().engineReady, true, JSON.stringify(f.status()));
+    await waitFor(() => assert.ok(observations().some((item) => item.properties.setup_available)), {
+      attempts: 40,
+      interval: 10,
+    });
+    assert.ok(observations().some((item) => item.properties.runtime_status === 'ready'));
+    f.children[0].emit('exit', 1);
+    await waitFor(
+      () =>
+        assert.ok(
+          observations().some(
+            (item) =>
+              item.properties.startup_status === 'failed' && !item.properties.setup_available,
+          ),
+        ),
+      { attempts: 40, interval: 10 },
+    );
+    const states = observations().map((item) =>
+      JSON.stringify([
+        item.properties.runtime_status,
+        item.properties.startup_status,
+        item.properties.setup_available,
+      ]),
+    );
+    assert.ok(states.every((value, index) => value !== states[index - 1]));
+    assert.ok(
+      f.nativeAnalytics.every((item) => item.distinct_id === observations()[0].distinct_id),
+    );
+    assert.equal(JSON.stringify(f.nativeAnalytics).includes(privateText), false);
+    assert.equal(
+      f.nativeAnalytics.find((item) => item.event === 'startup_path_selected')?.properties
+        .local_setup_telemetry_available,
+      true,
+    );
+    for (const item of observations())
+      assert.deepEqual(
+        Object.keys(item.properties)
+          .filter(
+            (key) =>
+              !key.startsWith('$') &&
+              !['analytics_schema', 'environment', 'surface', 'app_version', 'route'].includes(key),
+          )
+          .sort(),
+        ['platform', 'runtime_status', 'setup_available', 'startup_status'],
+      );
+  } finally {
+    await f.close();
+  }
+});
+
+test('queued native local setup observations stop after consent or path changes and close', async (t) => {
+  for (const action of ['opt_out', 'remote', 'close', 'disabled']) {
+    await t.test(action, async (t) => {
+      const loading = deferred();
+      const metadata = deferred();
+      let hold = false;
+      const f = await runningDesktop(t, async () => Response.json({ ok: true }), {
+        initialState: 'fresh',
+        packaged: true,
+        buildMetadata: { release: true },
+        version: '0.1.17',
+        environment: action === 'disabled' ? { NOD_ANALYTICS_ENABLED: 'false' } : {},
+        nativeMetadataRead: () => {
+          if (!hold) return;
+          loading.resolve();
+          return metadata.promise;
+        },
+      });
+      try {
+        await f.launch();
+        await f.nativeOpening();
+        hold = true;
+        const setup = f.windows[0];
+        const event = { sender: setup.webContents, senderFrame: setup.webContents.mainFrame };
+        await f.handlers.get('nod:settings:save')(event, {
+          welcome: { usageData: true, continued: false },
+        });
+        if (action !== 'disabled') await loading.promise;
+        if (action === 'opt_out') {
+          await f.handlers.get('nod:settings:save')(event, {
+            welcome: { usageData: false, continued: false },
+          });
+          await f.handlers.get('nod:settings:save')(event, {
+            welcome: { usageData: true, continued: false },
+          });
+        } else if (action === 'remote') void f.captureStartupPath('remote');
+        else if (action === 'close') await f.close();
+        metadata.resolve();
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        assert.deepEqual(
+          f.nativeAnalytics.filter((item) => item.event === 'local_setup_observed'),
+          [],
+        );
+      } finally {
+        metadata.resolve();
+        await f.close();
+      }
+    });
+  }
+});
+
 test(
   'native opening and path captures stop when Welcome opts out during metadata loading',
   { timeout: 15_000 },
@@ -1368,10 +1517,30 @@ test('a later local choice replaces an earlier remote startup path under the sam
       },
       { attempts: 40, interval: 10 },
     );
-    assert.equal(second.nativeAnalytics.length, 1);
-    assert.equal(second.nativeAnalytics[0].distinct_id, distinctId);
+    assert.equal(
+      second.nativeAnalytics.filter((item) => item.event === 'startup_path_selected').length,
+      1,
+    );
+    assert.equal(second.nativeAnalytics.filter((item) => item.event === 'app_opened').length, 0);
+    assert.ok(second.nativeAnalytics.every((item) => item.distinct_id === distinctId));
   } finally {
     await second.close();
+  }
+  const restarted = await runningDesktop(t, async () => Response.json({ ok: true }), {
+    ...options,
+    storedProfile: second.storage,
+  });
+  try {
+    await restarted.launch();
+    await waitFor(
+      () =>
+        assert.ok(restarted.nativeAnalytics.some((item) => item.event === 'local_setup_observed')),
+      { attempts: 40, interval: 10 },
+    );
+    assert.ok(restarted.nativeAnalytics.every((item) => item.distinct_id === distinctId));
+    assert.equal(restarted.nativeAnalytics.filter((item) => item.event === 'app_opened').length, 0);
+  } finally {
+    await restarted.close();
   }
 });
 
@@ -1436,7 +1605,7 @@ test('native first open waits for consent on disabled and returning profiles', a
 test('Windows onboarding waits for storage before unlocking credentials and exposes prerequisite recovery', async (t) => {
   const revealed = [];
   const cause = `Synthetic WSL missing: ${'x'.repeat(450)} HCS_E_HYPERV_NOT_INSTALLED`;
-  const details = `Error: ${cause}\n${'Synthetic WSL output\n'.repeat(200)}End of native error`;
+  const details = `Error: ${cause}\n${join(homedir(), 'synthetic-folder')}\n${'Synthetic WSL output\n'.repeat(200)}End of native error`;
   const f = await runningDesktop(
     t,
     async () => assert.fail('No backend can run without storage.'),
@@ -1453,6 +1622,11 @@ test('Windows onboarding waits for storage before unlocking credentials and expo
   f.storage.store.environment = async () =>
     assert.fail('No credentials are needed before storage.');
   try {
+    await mkdir(join(f.profileRoot, 'logs'), { recursive: true });
+    await appendFile(
+      join(f.profileRoot, 'logs', 'startup.log'),
+      'Synthetic earlier line\n'.repeat(4000),
+    );
     await f.launch();
     await f.prepare();
     assert.equal(f.children.length, 0);
@@ -1466,8 +1640,11 @@ test('Windows onboarding waits for storage before unlocking credentials and expo
     await showLog(event);
     assert.deepEqual(revealed, [join(f.profileRoot, 'logs', 'startup.log')]);
     const log = await readFile(revealed[0], 'utf8');
+    assert.ok(log.startsWith('Synthetic earlier line\n'));
+    assert.ok(log.length < 64 * 1024);
     assert.ok(log.includes(cause));
-    assert.ok(log.includes(details));
+    assert.ok(log.includes(details.replaceAll(homedir(), '<home>')));
+    assert.equal(log.includes(homedir()), false);
     assert.equal(f.status().error, cause);
     assert.ok(f.status().details.includes(details));
     assert.ok(f.status().details.includes('NOD_WSL_REQUIRED'));
@@ -1763,6 +1940,18 @@ test('native startup recovery keeps current status and serializes retry, prerequ
           .querySelector('[role="alert"]')
           ?.textContent.includes('Synthetic retry failed'),
       );
+      await settle(() => button('Report bug') && !button('Report bug').disabled);
+      button('Report bug').click();
+      await settle(() => calls.length === 2);
+      assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), [
+        'prepare',
+        { retry: true, report: true },
+      ]);
+      await settle(() =>
+        page.window.document
+          .querySelector('[role="alert"]')
+          ?.textContent.includes('Synthetic retry failed'),
+      );
       publish({ phase: 'preparing', runtime: { phase: 'downloading', progress: 0.42 } });
       await settle(() => page.window.document.querySelector('progress')?.value === 0.42);
       assert.equal(page.window.document.querySelector('[role="alert"]'), null);
@@ -1786,10 +1975,10 @@ test('native startup recovery keeps current status and serializes retry, prerequ
           !button('Choose runtime file').disabled &&
           page.window.document.querySelector('[role="alert"]'),
       );
-      assert.equal(calls.filter(([name]) => name === 'prepare').length, 1);
+      assert.equal(calls.filter(([name]) => name === 'prepare').length, 2);
       assert.ok(page.window.document.querySelector('[role="alert"]'));
       button('Choose runtime file').click();
-      await settle(() => calls.filter(([name]) => name === 'prepare').length === 2);
+      await settle(() => calls.filter(([name]) => name === 'prepare').length === 3);
       assert.deepEqual(calls.at(-1), ['prepare', undefined]);
       await settle(() => !page.window.document.querySelector('[role="alert"]'));
     });
@@ -2462,7 +2651,7 @@ test('a missing native setup renderer offers explicit recovery without hidden ke
       try {
         const launched = f.launch();
         for (let attempt = 0; !f.windows.length && attempt < 100; attempt++)
-          await new Promise(setImmediate);
+          await new Promise((resolve) => wait(resolve, 5));
         const window = f.windows[0];
         assert.ok(window);
         assert.equal(window.isVisible(), false);
@@ -5030,6 +5219,130 @@ commonName = supplied
   assert.equal(requests.length, 2);
 });
 
+test('expired system certificates do not replace a valid chain the server sends', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'nod-expired-system-ca-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const defaults = getCACertificates('default');
+  t.after(() => setDefaultCACertificates(defaults));
+  const execute = promisify(execFile);
+  const openssl = (...args) =>
+    execute('openssl', args, { cwd: directory, timeout: 10_000, windowsHide: true });
+  await writeFile(
+    join(directory, 'ca.cnf'),
+    `[req]
+distinguished_name = dn
+[dn]
+[ca]
+default_ca = local
+[local]
+database = index
+new_certs_dir = .
+serial = serial
+default_md = sha256
+default_days = 1
+unique_subject = no
+policy = policy
+[policy]
+commonName = supplied
+`,
+  );
+  await writeFile(join(directory, 'index'), '');
+  await writeFile(join(directory, 'serial'), '01\n');
+  await writeFile(
+    join(directory, 'intermediate.ext'),
+    'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\n',
+  );
+  await writeFile(
+    join(directory, 'server.ext'),
+    'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid\nsubjectAltName=IP:127.0.0.1\n',
+  );
+  const keyOptions = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes'];
+  await openssl(
+    'req',
+    '-x509',
+    '-sha256',
+    ...keyOptions,
+    '-keyout',
+    'root.key',
+    '-out',
+    'root.pem',
+    '-days',
+    '1',
+    '-subj',
+    '/CN=Nod test root',
+    '-config',
+    'ca.cnf',
+    '-addext',
+    'basicConstraints=critical,CA:TRUE',
+    '-addext',
+    'keyUsage=critical,keyCertSign,cRLSign',
+  );
+  for (const name of ['intermediate', 'server'])
+    await openssl(
+      'req',
+      '-new',
+      ...keyOptions,
+      '-keyout',
+      `${name}.key`,
+      '-out',
+      `${name}.csr`,
+      '-subj',
+      `/CN=Nod test ${name}`,
+      '-config',
+      'ca.cnf',
+    );
+  const sign = (issuer, request, output, dates = []) =>
+    openssl(
+      'ca',
+      '-batch',
+      '-notext',
+      '-config',
+      'ca.cnf',
+      '-cert',
+      `${issuer}.pem`,
+      '-keyfile',
+      `${issuer}.key`,
+      '-in',
+      `${request}.csr`,
+      '-out',
+      `${output}.pem`,
+      '-extfile',
+      `${request}.ext`,
+      ...dates,
+    );
+  await sign('root', 'intermediate', 'intermediate');
+  await sign('root', 'intermediate', 'stale', [
+    '-startdate',
+    '20000101000000Z',
+    '-enddate',
+    '20000102000000Z',
+  ]);
+  await sign('intermediate', 'server', 'server');
+  const [root, intermediate, stale, leaf] = await Promise.all(
+    ['root', 'intermediate', 'stale', 'server'].map((name) =>
+      readFile(join(directory, `${name}.pem`), 'utf8'),
+    ),
+  );
+  const server = createHttpsServer(
+    { key: await readFile(join(directory, 'server.key')), cert: leaf + intermediate },
+    (_request, response) => response.end('ok'),
+  );
+  t.after(() => {
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `https://127.0.0.1:${server.address().port}`;
+  setDefaultCACertificates([...defaults, root, stale]);
+  await assert.rejects(fetch(url), (error) => error.cause?.code === 'CERT_HAS_EXPIRED');
+  setDefaultCACertificates(defaults);
+  trustSystemCertificates({
+    getCACertificates: (type) => (type === 'system' ? [root, stale] : getCACertificates(type)),
+    setDefaultCACertificates,
+  });
+  assert.equal(await (await fetch(url)).text(), 'ok');
+});
+
 test('remote setup remains visible and navigable while the encrypted server token waits for macOS storage', async (t) => {
   const output = await mkdtemp(join(tmpdir(), 'nod-native-remote-unlock-'));
   t.after(() => rm(output, { recursive: true, force: true }));
@@ -7397,6 +7710,7 @@ async function updatePreparation({
       engine: undefined,
       closingEngine: false,
       pendingPreload: undefined,
+      updateEvent: async () => {},
       loadRuntime: async (url) =>
         url.endsWith('/windows.mjs')
           ? {
@@ -7873,7 +8187,7 @@ test('native readiness notification waits for full runtime readiness and reaches
   }
 });
 
-test('artifact exports keep owned bytes, safe names, separate saves and restricted opening', async () => {
+test('artifact exports keep owned bytes, safe names, separate saves and restricted opening, and remove failed downloads', async () => {
   const { createArtifactFiles, canOpenArtifact } = await import('../main/artifact-files.mjs');
   const root = await mkdtemp(join(tmpdir(), 'nod-artifact-contract-'));
   let requests = 0;
@@ -7925,6 +8239,24 @@ test('artifact exports keep owned bytes, safe names, separate saves and restrict
       fetchArtifact: async () => new Response('', { status: 404 }),
     });
     await assert.rejects(absent.prepare(randomUUID()), /no longer available/);
+    const brokenRoot = await mkdtemp(join(root, 'broken-'));
+    const broken = createArtifactFiles({
+      temporary: brokenRoot,
+      downloads: root,
+      fetchArtifact: async () =>
+        new Response(
+          new ReadableStream({
+            async pull(controller) {
+              controller.enqueue(new TextEncoder().encode('Partial synthetic bytes'));
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              controller.error(new Error('Synthetic connection reset'));
+            },
+          }),
+        ),
+    });
+    await assert.rejects(broken.prepare(randomUUID()), /Synthetic connection reset/);
+    const [created] = await readdir(brokenRoot);
+    assert.deepEqual(await readdir(join(brokenRoot, created)), []);
     const blocked = join(root, 'not-a-directory');
     await writeFile(blocked, 'Synthetic disk setup failure');
     let cancelled = false;
@@ -8076,10 +8408,9 @@ test('ready desktop updates share Later across engine windows and reopen for a n
   assert.deepEqual(restarts, []);
 });
 
-test('in-app update restart keeps Later safe and shares one confirmation', async (t) => {
-  const choice = deferred();
-  const shown = deferred();
-  const prompts = [];
+test('in-app update restart restarts once without asking again', async (t) => {
+  const restarted = deferred();
+  const started = deferred();
   const restarts = [];
   const updater = {
     ready: undefined,
@@ -8089,18 +8420,11 @@ test('in-app update restart keeps Later safe and shares one confirmation', async
     },
     async restart() {
       restarts.push(this.ready.version);
+      started.resolve();
+      await restarted.promise;
     },
   };
-  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'), {
-    prompt: (options) => {
-      prompts.push(options);
-      if (prompts.length === 1) {
-        shown.resolve();
-        return choice.promise;
-      }
-      return { response: 0 };
-    },
-  });
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'));
   f.showEngine();
   await new Promise(setImmediate);
   const window = f.windows.at(-1);
@@ -8111,23 +8435,40 @@ test('in-app update restart keeps Later safe and shares one confirmation', async
   await f.checkUpdates(updater, false);
 
   const first = restart(event);
-  await shown.promise;
+  await started.promise;
   const second = restart(event);
-  assert.equal(prompts.length, 1);
   assert.equal(status(event).checking, true);
   assert.equal(f.updateMenu.enabled, false);
-  assert.match(prompts[0].message, /Nod 0\.5\.2 is ready/);
-  assert.deepEqual([...prompts[0].buttons], ['Restart', 'Later']);
-  assert.equal(prompts[0].defaultId, 1);
-  assert.equal(prompts[0].cancelId, 1);
-  choice.resolve({ response: 1 });
+  restarted.resolve();
   await Promise.all([first, second]);
-  assert.deepEqual(restarts, []);
-  assert.equal(status(event).readyVersion, '0.5.2');
+  assert.deepEqual(restarts, ['0.5.2']);
   assert.equal(status(event).checking, false);
+});
 
-  await restart(event);
-  assert.equal(prompts.length, 2);
+test('in-app update restart during a background check restarts without asking again', async (t) => {
+  const checked = deferred();
+  const restarts = [];
+  const updater = {
+    ready: undefined,
+    async check() {
+      await checked.promise;
+      this.ready = { version: '0.5.2' };
+      return this.ready;
+    },
+    async restart() {
+      restarts.push(this.ready.version);
+    },
+  };
+  const f = await runningDesktop(t, () => assert.fail('No engine request is needed.'));
+  f.showEngine();
+  await new Promise(setImmediate);
+  const window = f.windows.at(-1);
+  const event = { sender: window.webContents, senderFrame: window.webContents.mainFrame };
+  const restart = f.handlers.get('nod:updates:restart');
+  const background = f.checkUpdates(updater, false);
+  const clicked = restart(event);
+  checked.resolve();
+  await Promise.all([background, clicked]);
   assert.deepEqual(restarts, ['0.5.2']);
 });
 
