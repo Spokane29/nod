@@ -1028,13 +1028,22 @@ export async function workOrigin(turnId: string, client: Pool | PoolClient = poo
       kind: WorkKind;
       task: ModelSelection | null;
       schedule: ModelSelection | null;
+      source_id: string | null;
     }>(
-      `SELECT ${workKindSql('cur')} AS kind,work_task.model AS task,work_schedule.model AS schedule
+      `SELECT ${workKindSql('cur')} AS kind,work_task.model AS task,work_schedule.model AS schedule,cur.source_id
        FROM turns cur ${workOriginSql('cur')} WHERE cur.id=$1 AND cur.owner_id=$2`,
       [turnId, ownerId],
     )
   ).rows[0];
-  return row && { kind: row.kind, task: row.task, schedule: row.schedule };
+  const portal = /^inbox:(?:(signin|status|invoice|hold):)?/.exec(row?.source_id ?? '');
+  return (
+    row && {
+      kind: row.kind,
+      task: row.task,
+      schedule: row.schedule,
+      ...(portal ? { portal: portal[1] ?? 'signin' } : {}),
+    }
+  );
 }
 
 export async function resumeTurn(

@@ -49,6 +49,7 @@ import { createDatabaseModelStore, type ModelRecord, type ModelState } from './m
 import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import type { SettingActor } from './analytics-settings.ts';
 import { logFailure } from './failure-log.ts';
+import { loadModelPolicy, policyChoice } from './model-policy.ts';
 import { modelFailureReason } from '../shared/model-quota.ts';
 import { createTextRedactor, redactSecretText } from './redaction.ts';
 import { afterCommit } from './transaction.ts';
@@ -99,6 +100,7 @@ export const modelRouteInput = z.union([modelSelectionInput, z.literal('light'),
 
 export interface WorkOrigin {
   kind: WorkKind;
+  portal?: string;
   task?: ModelSelection | null;
   schedule?: ModelSelection | null;
 }
@@ -1121,11 +1123,25 @@ export function createModelService(options: {
       return choice;
     },
     workModel(origin: WorkOrigin): WorkModel {
-      const work = routeModel(
+      const policy = loadModelPolicy();
+      const explicit = origin.task || (origin.kind === 'schedule' && origin.schedule);
+      if (policy && !explicit) {
+        const lane = origin.portal ? (origin.portal === 'hold' ? 'hold' : 'portal') : origin.kind;
+        const pick = policyChoice(policy, lane, rows);
+        if (pick) return { selection: pick, follows: origin.kind === 'chat' ? 'chat' : 'lane' };
+      }
+      const routed = routeModel(
         { connections: rows, selection, routes, light: lightModel() },
         origin.kind,
         origin,
       );
+      const stalled =
+        routed &&
+        (rows.find((item) => item.id === routed.selection.connectionId)?.retry?.[
+          routed.selection.modelId
+        ] ?? 0) > Date.now();
+      const backup = policy && stalled ? policyChoice(policy, 'fallback', rows) : undefined;
+      const work = backup ? { selection: backup, follows: routed!.follows } : routed;
       if (!work)
         throw new ConnectionError('Open Settings > Models. Connect a service and choose a model.');
       if (work.follows === 'chat' || work.follows === 'light') return work;

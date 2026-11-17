@@ -2340,6 +2340,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     NOD_ANALYTICS_ENVIRONMENT: analyticsEnvironment(nodBuild),
     NOD_PUBLIC_URL: engineOrigin,
     NOD_DATA_ROOT: profileRoot,
+    NOD_MODEL_POLICY: join(app.getPath('userData'), 'model-policy.json'),
     NOD_WEB_ROOT: join(engineRoot, 'dist', 'web'),
     ...(browserExecutable ? { NOD_BROWSER_EXECUTABLE: browserExecutable } : {}),
     ...(browserCdp ? { NOD_BROWSER_CDP: browserCdp } : {}),

@@ -213,3 +213,11 @@ The workspace can reach public internet addresses. Source installs and self-host
 - [Nod's workspace](/use/workspace/)
 - [The browser](/use/browser/)
 - [Security model and limits](/trust/security-model/)
+
+### Model plan
+
+:::caution[Fork-only]
+Keep this out of any upstream pull request unless that is flagged.
+:::
+
+A `model-policy.json` file in the desktop app's data folder picks a model per kind of work and a backup chain. It has lists of `model@effort` entries under `chat`, `schedule`, `background`, `portal` (sign-in, status and invoice jobs from the inbox), `hold` (courtesy holds) and `fallback`. For each turn Nod takes the first model in the kind's list, then in `fallback`, whose connection is connected and that is not paused after a failed request. A task or schedule you set to a specific model keeps that model, and moves to `fallback` only while it is paused. The file overrides the model chosen in Settings for those kinds of work; delete the file to go back to Settings. A malformed file is ignored and logged. The turn that hits a failure still fails; the next turns use the backup until the failed model's pause ends.
