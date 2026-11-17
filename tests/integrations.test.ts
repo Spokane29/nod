@@ -10053,7 +10053,7 @@ test(
         CREATE TABLE threads(id uuid PRIMARY KEY,owner_id text NOT NULL,archived_at timestamptz);
         CREATE TABLE turns(id uuid PRIMARY KEY,owner_id text NOT NULL,source text NOT NULL,source_id text,
           message_id uuid,prompt text NOT NULL,channel text NOT NULL DEFAULT 'web',status text NOT NULL DEFAULT 'succeeded',
-          error text,created_at timestamptz NOT NULL DEFAULT now(),thread_id uuid,session_id uuid,task_id uuid);
+          error text,created_at timestamptz NOT NULL DEFAULT now(),thread_id uuid,session_id uuid,task_id uuid,parent_turn_id uuid);
         CREATE TABLE turn_events(id uuid DEFAULT gen_random_uuid(),turn_id uuid,type text,summary text DEFAULT '',site text,parent_run_id uuid,call_id uuid,command jsonb,created_at timestamptz NOT NULL DEFAULT now());
         CREATE TABLE messages(id uuid,owner_id text,role text,text text,turn_id uuid,thread_id uuid,created_at timestamptz DEFAULT now(),hidden_at timestamptz);
         CREATE TABLE preferences(owner_id text PRIMARY KEY,time_zone text,locale text,hour_cycle text);
