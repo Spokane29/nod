@@ -26,6 +26,7 @@ import type {
 } from '../shared/models.ts';
 import {
   apiKeyConnectionProviders,
+  boundedPrice,
   modelProviderInfo,
   modelProviderNames,
   azureDeploymentPattern,
@@ -38,6 +39,7 @@ import {
   routeModel,
 } from '../shared/models.ts';
 import { signInPage } from '../shared/sign-in-page.ts';
+import { appPages } from '../shared/app-links.ts';
 import { modelKeyError } from '../shared/model-keys.ts';
 import {
   agentModels,
@@ -247,7 +249,7 @@ function textCompanion(row: Pick<ModelRecord, 'provider' | 'method' | 'models'>)
 
 function missingTextCompanion() {
   return new ConnectionError(
-    'This audio model needs a text model on the same connection. Refresh its models or choose another model in Settings > Models.',
+    `This audio model needs a text model on the same connection. Refresh its models or choose another model in ${appPages['/settings/models']}.`,
   );
 }
 
@@ -281,12 +283,12 @@ function attention(row: Pick<ModelRecord, 'provider' | 'method' | 'managed' | 's
   const name = `the ${modelSource(row)} connection`;
   return new ConnectionError(
     row.status === 'loading'
-      ? `Load the models for ${name} in Settings > Models.`
+      ? `Load the models for ${name} in ${appPages['/settings/models']}.`
       : row.managed
-        ? `Refresh ${name} in Settings > Models.`
+        ? `Refresh ${name} in ${appPages['/settings/models']}.`
         : row.method === 'api_key'
-          ? `Remove ${name} and add it again in Settings > Models.`
-          : `Reconnect ${name} in Settings > Models.`,
+          ? `Remove ${name} and add it again in ${appPages['/settings/models']}.`
+          : `Reconnect ${name} in ${appPages['/settings/models']}.`,
   );
 }
 
@@ -381,12 +383,26 @@ export function createModelService(options: {
       status: 'waiting' | 'completing' | 'connected' | 'failed';
       error?: string;
       completion?: Promise<void>;
+      cancelled?: { reason: string; phase: string };
     }
   >();
-  async function cancel(state: string) {
+  function signInFailure(attempt: NonNullable<ReturnType<typeof attempts.get>>, error: unknown) {
+    return {
+      provider: attempt.provider,
+      reason: attempt.cancelled?.reason ?? Object(error).reason,
+      phase: attempt.cancelled?.phase ?? attempt.status,
+      elapsedMs: Date.now() - (attempt.expires - 600000),
+    };
+  }
+  async function cancel(state: string, reason = 'cancelled') {
     const attempt = attempts.get(state);
     if (!attempt) return;
     clearTimeout(attempt.timer);
+    if (attempt.status === 'waiting' || attempt.status === 'completing') {
+      attempt.cancelled ??= { reason, phase: attempt.status };
+      if (!attempt.completion)
+        logFailure('model_sign_in_failed', undefined, signInFailure(attempt, undefined));
+    }
     attempt.status = 'failed';
     attempt.controller.abort();
     await attempt.completion?.catch(() => {});
@@ -448,8 +464,16 @@ export function createModelService(options: {
     const key = `${row.id}:${state.selection!.modelId}:${credentialTag(credential(row))}`;
     if (key === checked) return;
     checked = key;
+    const saved = credential(row);
+    const port = saved?.type === 'endpoint' ? new URL(saved.url).port : undefined;
     pendingCheck = selectionCheck().catch((error: unknown) =>
-      logFailure('model_check_failed', error),
+      logFailure('model_check_failed', error, {
+        provider: row.provider,
+        ...(port === undefined
+          ? {}
+          : { serverKind: port === '11434' ? 'ollama' : port === '1234' ? 'lmstudio' : 'other' }),
+        status: Object(error).providerStatus,
+      }),
     );
   }
   function requested(row: ModelRecord | undefined, modelId: string | undefined) {
@@ -480,7 +504,7 @@ export function createModelService(options: {
         ).get(modelId);
         if (automatic && failure && Date.now() < failure.retryAt)
           throw new ConnectionError(
-            `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in Settings > Models or ask again to make a new request.`,
+            `${modelProviderNames[row.provider]} failed the last request to ${modelId} (${failure.reason}). Automatic requests to this model are paused until a request succeeds. Check this connection in ${appPages['/settings/models']} or ask again to make a new request.`,
           );
         return async (error) => {
           if (!tag || closed) return;
@@ -616,6 +640,38 @@ export function createModelService(options: {
       void reload().catch((error: unknown) => logFailure('model_settings_reload_failed', error));
     });
   }
+  function chosen(auxiliary: boolean, choice: ModelSelection | null) {
+    const selected = auxiliary ? selection && { ...selection } : choice && { ...choice };
+    const row = rows.find((row) => row.id === selected?.connectionId);
+    if (!row || !selected)
+      throw new ConnectionError(
+        `Open ${appPages['/settings/models']}. Connect a service and choose a model.`,
+      );
+    if (row.status !== 'connected') throw attention(row);
+    const definition =
+      (auxiliary
+        ? row.models.find((model) => model.choice.id === memoryModels[row.provider])
+        : undefined) ?? row.models.find((model) => model.choice.id === selected.modelId);
+    if (!definition || (!definition.choice.efforts.includes(selected.effort) && !auxiliary))
+      throw new ConnectionError(
+        `The selected model is unavailable on this connection (${row.provider} / ${selected.modelId}). Reload its models or choose another model in ${appPages['/settings/models']}.`,
+      );
+    const companion = definition.choice.audio ? textCompanion(row) : undefined;
+    if (definition.choice.audio && !companion) throw missingTextCompanion();
+    return { selected, row, definition, companion };
+  }
+  function unpricedPreparationModel() {
+    try {
+      const background = service.workModel({ kind: 'background' }).selection;
+      for (const auxiliary of [false, true]) {
+        const { definition, companion } = chosen(auxiliary, background);
+        const target = companion ?? definition;
+        if (!boundedPrice(modelPricing(target))) return target.choice.name;
+      }
+    } catch {
+      return;
+    }
+  }
   function lightModel(): ModelSelection | null {
     const candidate = classificationModel();
     if (!candidate) return null;
@@ -655,7 +711,7 @@ export function createModelService(options: {
     const place =
       work.follows === 'task' || work.follows === 'schedule'
         ? 'choose another model for it in Scheduled'
-        : 'choose another model in Settings > Models';
+        : `choose another model in ${appPages['/settings/models']}`;
     if (row && row.status !== 'connected') {
       const reason = attention(row).message;
       return new ConnectionError(
@@ -901,7 +957,7 @@ export function createModelService(options: {
       try {
         attempt.complete!(callback);
       } catch (error) {
-        await cancel(state);
+        await cancel(state, Object(Object(error).cause).reason ?? 'callback_rejected');
         throw error;
       }
     } else {
@@ -942,7 +998,8 @@ export function createModelService(options: {
       attempt.status = 'connected';
       connectionChanged(attempt.provider, method, 'connected');
     } catch (error) {
-      logFailure('model_sign_in_failed', error instanceof Error ? (error.cause ?? error) : error);
+      const cause = error instanceof Error ? (error.cause ?? error) : error;
+      logFailure('model_sign_in_failed', cause, signInFailure(attempt, cause));
       if (!attempt.controller.signal.aborted) connectionChanged(attempt.provider, method, 'failed');
       attempt.status = 'failed';
       attempt.error =
@@ -965,18 +1022,25 @@ export function createModelService(options: {
     return attempt?.provider;
   }
   function start(provider: 'openai' | 'openrouter', connectionId?: string) {
-    const result = starting.then(() => begin(provider, connectionId));
+    const capture = snapshotAnalytics(analytics);
+    const result = starting
+      .then(() => begin(provider, connectionId))
+      .catch((error) => {
+        if (!closed && capture)
+          connectionChanged(
+            provider,
+            provider === 'openai' ? 'subscription' : 'oauth',
+            'failed',
+            capture,
+          );
+        throw error;
+      });
     starting = result.catch(() => {});
     return result;
   }
   async function begin(provider: 'openai' | 'openrouter', connectionId?: string) {
     if (closed) throw new ConnectionError('Model connections have stopped.');
-    try {
-      await checkStorage();
-    } catch (error) {
-      connectionChanged(provider, provider === 'openai' ? 'subscription' : 'oauth', 'failed');
-      throw error;
-    }
+    await checkStorage();
     const saved = await store.read();
     await reload();
     const row = connectionId
@@ -992,12 +1056,17 @@ export function createModelService(options: {
           attempt.provider === provider &&
           (attempt.controller.signal.aborted || ['waiting', 'completing'].includes(attempt.status)))
       )
-        await cancel(state);
+        await cancel(state, attempt.expires < Date.now() ? 'timeout' : 'superseded');
     if (closed) throw new ConnectionError('Model connections have stopped.');
     const controller = new AbortController();
     pendingControllers.add(controller);
     let flow: Awaited<ReturnType<ModelBackend['signIn']>> | undefined;
-    const timeout = setTimeout(() => controller.abort(), 15000);
+    const started = Date.now();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, 15000);
     timeout.unref();
     try {
       const auth =
@@ -1015,7 +1084,7 @@ export function createModelService(options: {
       flow?.result.catch(() => {});
       controller.signal.throwIfAborted();
       const timer = setTimeout(() => {
-        void cancel(auth.state);
+        void cancel(auth.state, 'timeout');
       }, 600000);
       timer.unref();
       const attempt: NonNullable<ReturnType<typeof attempts.get>> = {
@@ -1036,6 +1105,13 @@ export function createModelService(options: {
       }
       return { url: auth.url, attempt: auth.state };
     } catch (error) {
+      const cause = error instanceof Error ? (error.cause ?? error) : error;
+      logFailure('model_sign_in_failed', cause, {
+        provider,
+        reason: timedOut ? 'timeout' : closed ? 'shutdown' : Object(cause).reason,
+        phase: 'start',
+        elapsedMs: Date.now() - started,
+      });
       controller.abort();
       await flow?.result.catch(() => {});
       throw error;
@@ -1093,6 +1169,7 @@ export function createModelService(options: {
       }
     },
     light: lightModel,
+    unpricedPreparationModel,
     priceOf(choice: ModelSelection | null | undefined) {
       const definition = rows
         .find((row) => row.id === choice?.connectionId)
@@ -1143,7 +1220,9 @@ export function createModelService(options: {
       const backup = policy && stalled ? policyChoice(policy, 'fallback', rows) : undefined;
       const work = backup ? { selection: backup, follows: routed!.follows } : routed;
       if (!work)
-        throw new ConnectionError('Open Settings > Models. Connect a service and choose a model.');
+        throw new ConnectionError(
+          `Open ${appPages['/settings/models']}. Connect a service and choose a model.`,
+        );
       if (work.follows === 'chat' || work.follows === 'light') return work;
       const row = rows.find((item) => item.id === work.selection.connectionId);
       const definition = row?.models.find((model) => model.choice.id === work.selection.modelId);
@@ -1192,6 +1271,8 @@ export function createModelService(options: {
       return () => observers.delete(observer);
     },
     view(): ModelsResponse {
+      const unpriced = unpricedPreparationModel();
+      const selectionIssue = selection ? service.issue(selection) : undefined;
       return {
         connections: rows.map(
           ({ id, provider, method, label, status, managed, models, keyEnding, issue }) => ({
@@ -1213,8 +1294,10 @@ export function createModelService(options: {
           }),
         ),
         selection,
+        ...(selectionIssue ? { selectionIssue } : {}),
         routes,
         light: lightModel(),
+        ...(unpriced ? { unpricedPreparationModel: unpriced } : {}),
       };
     },
     async initialize() {
@@ -1357,7 +1440,8 @@ export function createModelService(options: {
     },
     async remove(id: string) {
       const capture = snapshotAnalytics(analytics);
-      for (const [state, attempt] of attempts) if (attempt.connectionId === id) await cancel(state);
+      for (const [state, attempt] of attempts)
+        if (attempt.connectionId === id) await cancel(state, 'connection_removed');
       const removed = await store.change((state) => {
         const row = state.connections.find((item) => item.id === id);
         if (row?.managed)
@@ -1468,21 +1552,7 @@ export function createModelService(options: {
       auxiliary = false,
       choice: ModelSelection | null = selection,
     ): Promise<ModelAccess> {
-      const selected = auxiliary ? selection && { ...selection } : choice && { ...choice };
-      const row = rows.find((row) => row.id === selected?.connectionId);
-      if (!row || !selected)
-        throw new ConnectionError('Open Settings > Models. Connect a service and choose a model.');
-      if (row.status !== 'connected') throw attention(row);
-      const definition =
-        (auxiliary
-          ? row.models.find((model) => model.choice.id === memoryModels[row.provider])
-          : undefined) ?? row.models.find((model) => model.choice.id === selected.modelId);
-      if (!definition || (!definition.choice.efforts.includes(selected.effort) && !auxiliary))
-        throw new ConnectionError(
-          `The selected model is unavailable on this connection (${row.provider} / ${selected.modelId}). Reload its models or choose another model in Settings > Models.`,
-        );
-      const companion = definition.choice.audio ? textCompanion(row) : undefined;
-      if (definition.choice.audio && !companion) throw missingTextCompanion();
+      const { selected, row, definition, companion } = chosen(auxiliary, choice);
       return {
         provider: row.provider,
         method: row.method,
@@ -1605,6 +1675,7 @@ export function createModelService(options: {
                 .string()
                 .regex(/^[A-Za-z0-9_-]{32,128}$/)
                 .parse(request.params.attempt),
+              'client_cancelled',
             );
             return service.view();
           },
@@ -1638,7 +1709,7 @@ export function createModelService(options: {
       closed = true;
       for (const controller of pendingControllers) controller.abort();
       await starting;
-      await Promise.all([...attempts.keys()].map(cancel));
+      await Promise.all([...attempts.keys()].map((state) => cancel(state, 'shutdown')));
       observers.clear();
       secrets.clear();
     },
