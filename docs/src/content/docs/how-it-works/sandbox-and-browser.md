@@ -129,10 +129,19 @@ Set `NOD_BROWSER_CDP` to the debugging port of a Chromium-based browser already 
 ### Sign-in inbox
 
 :::caution[Fork-only]
-This loosens the rule that only the owner's chat starts work, for exactly one fixed action. Keep it out of any upstream pull request unless that is flagged.
+This loosens the rule that only the owner's chat starts work, for a few fixed portal jobs. Keep it out of any upstream pull request unless that is flagged.
 :::
 
 Another program on the same Mac can ask the desktop app to sign in to one pre-approved portal, with no person and no chat. It is off unless you turn it on, and it is available on macOS only.
+
+A request file holds `site` and, for jobs other than a sign-in, `job` and `ref`. Any other field refuses the request. The jobs are:
+
+- `signin` (the default): sign in and leave the tab open.
+- `status`: read the status, hold expiry, due dates and balance of up to 10 booking numbers (`ref`, comma-separated). The reply starts with DUE-SOON or ALL-CLEAR.
+- `invoice`: download one booking's invoice or confirmation with the portal's own control.
+- `hold`: prepare a courtesy hold for one 4Vacations quote (`ref`), read from the 4Vacations admin page. Nod stops before the final hold control and asks you; only your yes places the hold. A hold that costs money or needs a card is refused. The reply ends with a `BOOKING <number> EXPIRES <time>` line.
+
+Each job has its own rate limits under the key `<site>.<job>`. Only sign-ins count toward pausing a site. A hold may wait up to 12 hours for your answer. Nod's last reply for each key is saved in `replies/<key>.json` in the records folder.
 
 - **Setting.** Set `NOD_SIGNIN_INBOX` to an absolute folder path, or put the path on one line in a `signin-inbox` file in the app's data folder. Without either, nothing is read, shown or watched. The setting is read once at app start and applies to a local engine only.
 - **Inbox folder.** It is outside Nod's data. It must be on the same disk as the app's data folder. The app refuses to start the inbox when the folder is a symlink, is under `~/Downloads`, `~/Desktop` or `~/Library/Mobile Documents`, or sits in a Documents folder that iCloud syncs. The reason goes to Nod's diagnostics log. A folder such as `~/nod-signin-inbox` works.

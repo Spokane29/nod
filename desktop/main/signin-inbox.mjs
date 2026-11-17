@@ -23,6 +23,7 @@ const rejectedLimit = 400;
 const acceptedLimit = 400;
 const passLimit = 200;
 const outcomeWaitMs = 30 * 60_000;
+const holdWaitMs = 12 * 3_600_000;
 const hour = 3_600_000;
 const day = 24 * hour;
 const siteKey = /^[a-z0-9]{2,20}$/;
@@ -95,6 +96,9 @@ export function parseAllowList(text) {
   return { sites, skipped };
 }
 
+export const portalJobs = ['signin', 'status', 'invoice', 'hold'];
+const bookingRef = /^[A-Za-z0-9][A-Za-z0-9-]{2,23}$/;
+
 export function validateRequest(text, sites) {
   if (typeof text !== 'string' || Buffer.byteLength(text) > requestBytes)
     return { ok: false, reason: 'request too large' };
@@ -108,9 +112,38 @@ export function validateRequest(text, sites) {
     return { ok: false, reason: 'not a JSON object' };
   if (typeof data.site !== 'string' || !siteKey.test(data.site))
     return { ok: false, reason: 'bad site key' };
+  if (Object.keys(data).some((key) => !['site', 'job', 'ref'].includes(key)))
+    return {
+      ok: false,
+      site: data.site,
+      reason: 'unknown field; only site, job and ref are allowed',
+    };
+  const job = data.job ?? 'signin';
+  if (!portalJobs.includes(job)) return { ok: false, site: data.site, reason: 'unknown job' };
+  let ref;
+  if (job === 'signin') {
+    if (data.ref !== undefined)
+      return { ok: false, site: data.site, reason: 'a sign-in takes no ref' };
+  } else {
+    const refs = typeof data.ref === 'string' ? data.ref.split(',') : [];
+    if (
+      !refs.length ||
+      refs.length > (job === 'status' ? 10 : 1) ||
+      !refs.every((value) => bookingRef.test(value))
+    )
+      return { ok: false, site: data.site, reason: `bad ref for ${job}` };
+    ref = refs.join(',');
+  }
   const url = sites.get(data.site);
   if (!url) return { ok: false, site: data.site, reason: 'site not in allow-list' };
-  return { ok: true, site: data.site, url };
+  return {
+    ok: true,
+    site: data.site,
+    url,
+    job,
+    ...(ref ? { ref } : {}),
+    key: job === 'signin' ? data.site : `${data.site}.${job}`,
+  };
 }
 
 export function pacificStamp(date) {
@@ -371,6 +404,7 @@ export function createGate(options) {
     },
     settle(site, confirmed) {
       delete state.pending[site];
+      if (site.includes('.')) return;
       if (confirmed) {
         delete state.strikes[site];
         return;
@@ -409,6 +443,7 @@ export function startSigninInbox(options) {
   const acceptedLogPath = join(records, 'accepted-log.txt');
   const acceptedDirectory = join(records, 'accepted');
   const rejectedDirectory = join(records, 'rejected');
+  const repliesDirectory = join(records, 'replies');
   const firstSeen = new Map();
   const stuck = new Set();
   const noted = new Set();
@@ -566,21 +601,21 @@ export function startSigninInbox(options) {
       );
       return 'done';
     }
-    const decision = gate.check(result.site, now);
+    const decision = gate.check(result.key, now);
     if (decision.state === 'reject') {
-      await reject(name, result.site, decision.reason, identity);
+      await reject(name, result.key, decision.reason, identity);
       return 'done';
     }
     const waiting = async (reason) => {
       if (now - seen > deferralMs) {
         noted.delete(identity);
-        await reject(name, result.site, reason, identity);
+        await reject(name, result.key, reason, identity);
         return 'done';
       }
       if (!noted.has(identity)) {
         if (noted.size > 1000) noted.clear();
         noted.add(identity);
-        await log(result.site, 'waiting', reason.replace(' for 15 minutes', ''));
+        await log(result.key, 'waiting', reason.replace(' for 15 minutes', ''));
       }
       return 'deferred';
     };
@@ -590,7 +625,7 @@ export function startSigninInbox(options) {
       .catch(() => false);
     if (!idle) return waiting('nod was busy or waiting for you for 15 minutes');
     const stamp = pacificStamp(new Date(now));
-    const base = `${result.site}-${stamp.file}`;
+    const base = `${result.key}-${stamp.file}`;
     const claimed = join(acceptedDirectory, `${base}.json`);
     try {
       await ensure(acceptedDirectory);
@@ -625,7 +660,11 @@ export function startSigninInbox(options) {
         const response = await request('/api/desktop/signin', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ url: result.url }),
+          body: JSON.stringify({
+            url: result.url,
+            job: result.job,
+            ...(result.ref ? { ref: result.ref } : {}),
+          }),
           signal: AbortSignal.timeout(30_000),
         });
         if (response.status === 409) busy = true;
@@ -644,7 +683,7 @@ export function startSigninInbox(options) {
       else await log(result.site, 'rejected', 'superseded while waiting');
       return 'deferred';
     }
-    gate.record(result.site, now);
+    gate.record(result.key, now);
     if (!posted) {
       try {
         await ensure(rejectedDirectory);
@@ -653,16 +692,18 @@ export function startSigninInbox(options) {
         await writeNew(`${target}.reason.txt`, `${failure}\n`);
       } catch {}
       await gate.save().catch(() => {});
-      await log(result.site, 'rejected', failure);
+      await log(result.key, 'rejected', failure);
       return 'done';
     }
-    if (typeof posted.turnId === 'string') gate.track(result.site, posted.turnId, now);
+    if (typeof posted.turnId === 'string') gate.track(result.key, posted.turnId, now);
     await gate.save().catch(() => {});
     await writeNew(
       join(acceptedDirectory, `${base}.result.json`),
       `${JSON.stringify(
         {
           site: result.site,
+          job: result.job,
+          ...(result.ref ? { ref: result.ref } : {}),
           url: result.url,
           acceptedAt: stamp.text,
           threadId: posted.threadId,
@@ -673,7 +714,7 @@ export function startSigninInbox(options) {
         2,
       )}\n`,
     ).catch(() => {});
-    await log(result.site, 'accepted', 'posted');
+    await log(result.key, 'accepted', 'posted');
     return 'done';
   }
 
@@ -696,24 +737,52 @@ export function startSigninInbox(options) {
   async function settle() {
     if (!options.outcome) return false;
     let waiting = false;
-    for (const [site, { turnId, at }] of Object.entries(gate.state.pending)) {
+    for (const [key, { turnId, at }] of Object.entries(gate.state.pending)) {
+      const hold = key.endsWith('.hold');
       let outcome;
       try {
         outcome = await options.outcome(turnId);
       } catch {
         outcome = undefined;
       }
-      const done = outcome && finished.has(outcome.turn);
-      if (!done && clock() - at < outcomeWaitMs) {
+      const done = outcome && finished.has(outcome.turn) && !(hold && outcome.turn === 'waiting');
+      if (!done && clock() - at < (hold ? holdWaitMs : outcomeWaitMs)) {
         waiting = true;
         continue;
       }
       const confirmed = Boolean(done) && outcomeConfirmed(outcome);
-      gate.settle(site, confirmed);
+      gate.settle(key, confirmed);
       await gate.save().catch(() => {});
-      await log(site, confirmed ? 'confirmed' : 'unconfirmed', 'sign-in outcome read');
+      await saveReply(key, turnId, outcome, confirmed);
+      await log(
+        key,
+        confirmed ? 'confirmed' : 'unconfirmed',
+        `${key.includes('.') ? 'job' : 'sign-in'} outcome read`,
+      );
     }
     return waiting;
+  }
+
+  async function saveReply(key, turnId, outcome, confirmed) {
+    try {
+      await ensure(repliesDirectory);
+      await writeAtomic(
+        join(repliesDirectory, `${key}.json`),
+        `${JSON.stringify(
+          {
+            key,
+            turnId,
+            confirmed,
+            turn: outcome?.turn ?? null,
+            signin: outcome?.signin ?? null,
+            readAt: pacificStamp(new Date(clock())).text,
+            reply: typeof outcome?.reply === 'string' ? outcome.reply : '',
+          },
+          null,
+          2,
+        )}\n`,
+      );
+    } catch {}
   }
 
   let beatAt = 0;
