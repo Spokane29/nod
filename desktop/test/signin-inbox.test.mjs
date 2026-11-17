@@ -710,3 +710,32 @@ test('the inbox is never off in silence: a status file says why', async (t) => {
   assert.match(notes[0], /Sign-in inbox is off: no inbox folder is set/);
   assert.match(off.updatedAt, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 });
+
+test('asking the owner about a new list is recorded in the status file first', async (t) => {
+  const paths = await directory();
+  t.after(() => rm(paths, { recursive: true, force: true }));
+  const dataDir = join(paths, 'data');
+  const inbox = join(paths, 'inbox');
+  await mkdir(dataDir);
+  await mkdir(inbox);
+  await writeFile(join(dataDir, allowFile), allowText);
+  let seen;
+  await prepareSigninInbox({
+    environment: inbox,
+    setting: '',
+    dataDir,
+    seal,
+    unseal,
+    status: (fields) => writeSigninStatus(dataDir, fields),
+    showDialog: async () => {
+      seen = JSON.parse(await readFile(join(dataDir, recordsFolder, statusFile), 'utf8'));
+      return 1;
+    },
+  });
+  assert.equal(seen.state, 'off');
+  assert.match(seen.reason, /waiting for the owner to approve/);
+  assert.match(
+    JSON.parse(await readFile(join(dataDir, recordsFolder, statusFile), 'utf8')).reason,
+    /not approved/,
+  );
+});

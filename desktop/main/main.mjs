@@ -349,6 +349,7 @@ function bounded(value, limit = 2000) {
 }
 
 function update(value) {
+  const wasReady = status.phase === 'ready';
   status = {
     ...status,
     ...value,
@@ -366,6 +367,10 @@ function update(value) {
   if (tray) tray.setToolTip(`Nod — ${status.phase === 'ready' ? 'Running' : status.message}`);
   showDownloadProgress();
   updateReadinessNotice();
+  if (!wasReady && status.phase === 'ready' && engine && !remoteConnection && !quitting)
+    void startSigninInboxFromSettings().catch(
+      (error) => void writeDiagnostic(bounded(error.message)).catch(() => {}),
+    );
 }
 
 function showDownloadProgress() {
@@ -544,9 +549,11 @@ async function startSigninInboxFromSettings() {
     environment: process.env.NOD_SIGNIN_INBOX,
     setting: await readFile(join(dataDir, 'signin-inbox'), 'utf8').catch(() => ''),
     dataDir,
-    showDialog: async ({ title, detail, buttons, defaultId, cancelId }) =>
-      (
-        await dialog.showMessageBox({
+    showDialog: async ({ title, detail, buttons, defaultId, cancelId }) => {
+      const parent = [engineWindow, setupWindow].find((window) => window && !window.isDestroyed());
+      if (!parent) return cancelId;
+      return (
+        await dialog.showMessageBox(parent, {
           type: 'question',
           title,
           message: title,
@@ -556,7 +563,8 @@ async function startSigninInboxFromSettings() {
           cancelId,
           noLink: true,
         })
-      ).response,
+      ).response;
+    },
     ...(safeStorage.isEncryptionAvailable()
       ? {
           seal: (text) => safeStorage.encryptString(text).toString('base64'),
@@ -3011,10 +3019,6 @@ else {
         welcomePassed = saved.onboardingPreferenceStep === 'complete';
         update({ remote: Boolean(saved.serverUrl) });
         applyPreferences(saved);
-        if (!saved.serverUrl)
-          void startSigninInboxFromSettings().catch(
-            (error) => void writeDiagnostic(bounded(error.message)).catch(() => {}),
-          );
         guidedStartup = !saved.serverUrl && saved.onboardingPreferenceStep !== 'complete';
         const presented = showSettings('general', true);
         if (saved.serverUrl || saved.onboardingPreferenceStep === 'complete' || saved.welcome)

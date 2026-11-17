@@ -284,7 +284,11 @@ export async function prepareSigninInbox(options) {
     return off('it is available on macOS only');
   const problem = await inboxLocationProblem(inbox, home, options.fs);
   if (problem) return off(problem);
-  const loaded = await loadAllowList({ dataDir, showDialog, seal, unseal });
+  const ask = async (dialog) => {
+    await status({ state: 'off', reason: 'waiting for the owner to approve the site list in Nod' });
+    return showDialog(dialog);
+  };
+  const loaded = await loadAllowList({ dataDir, showDialog: ask, seal, unseal });
   if (!loaded.sites) return off(loaded.reason);
   if (loaded.skipped.length) diagnostic('Sign-in inbox ignored invalid allow-list entries.');
   await status({ state: 'on', reason: null, inbox, sites: [...loaded.sites.keys()] });
