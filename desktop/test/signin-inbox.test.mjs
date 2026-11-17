@@ -21,6 +21,9 @@ import {
   allowListDialog,
   approvedFile,
   createGate,
+  hourlyLimit,
+  siteDailyLimit,
+  totalDailyLimit,
   dialogTitle,
   recordsFolder,
   statusFile,
@@ -288,12 +291,12 @@ test('the limits cover site, hour, day and total, and a lost state file holds fo
   gate.record('a', clock);
   assert.match(gate.check('a', clock + 599_000).reason, /one request per site/);
   assert.equal(gate.check('a', clock + 601_000).state, 'ok');
-  for (let i = 0; i < 11; i++) gate.record(`s${i}x`, clock + 1000);
-  assert.match(gate.check('fresh', clock + 5000).reason, /12 requests per hour/);
+  for (let i = 0; i < hourlyLimit - 1; i++) gate.record(`s${i}x`, clock + 1000);
+  assert.match(gate.check('fresh', clock + 5000).reason, /requests per hour/);
   await gate.save();
   const reloaded = createGate({ file, now: () => clock });
   await reloaded.load();
-  assert.match(reloaded.check('fresh', clock + 5000).reason, /12 requests per hour/);
+  assert.match(reloaded.check('fresh', clock + 5000).reason, /requests per hour/);
   assert.match(reloaded.check('a', clock + 5000).reason, /one request per site/);
   await writeFile(file, '{ broken');
   const broken = createGate({ file, now: () => clock });
@@ -303,11 +306,15 @@ test('the limits cover site, hour, day and total, and a lost state file holds fo
   const daily = createGate({ file: join(dataDir, 'daily.json'), now: () => clock });
   await daily.load();
   clock += 11 * 60_000;
-  for (let i = 0; i < 6; i++) daily.record('a', clock - (i + 1) * 3 * hour());
-  assert.match(daily.check('a', clock).reason, /6 requests per site per day/);
+  for (let i = 0; i < siteDailyLimit; i++) daily.record('a', clock - (i + 1) * 80 * 60_000);
+  assert.match(
+    daily.check('a', clock).reason,
+    new RegExp(`${siteDailyLimit} requests per site per day`),
+  );
   assert.equal(daily.check('b', clock).state, 'ok');
-  for (let i = 0; i < 18; i++) daily.record(`t${i}x`, clock - (i + 1) * 70 * 60_000 + 1);
-  assert.match(daily.check('b', clock).reason, /24 requests per day|12 requests per hour/);
+  for (let i = 0; i < totalDailyLimit - siteDailyLimit; i++)
+    daily.record(`t${i}x`, clock - (i + 1) * 30 * 60_000 + 1);
+  assert.match(daily.check('b', clock).reason, new RegExp(`${totalDailyLimit} requests per day`));
 });
 
 function hour() {

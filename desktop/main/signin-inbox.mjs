@@ -7,9 +7,9 @@ import { isAbsolute, join, resolve, sep } from 'node:path';
 
 export const requestBytes = 2048;
 export const siteIntervalMs = 10 * 60_000;
-export const hourlyLimit = 12;
-export const siteDailyLimit = 6;
-export const totalDailyLimit = 24;
+export const hourlyLimit = 20;
+export const siteDailyLimit = 16;
+export const totalDailyLimit = 60;
 export const deferralMs = 15 * 60_000;
 export const unconfirmedLimit = 2;
 export const dialogTitle = 'Allow sign-in requests?';
@@ -353,11 +353,14 @@ export function createGate(options) {
       if (last.some((at) => now - at < siteMs))
         return { state: 'reject', reason: 'rate limit: one request per site every 10 minutes' };
       if (recent.filter(([, at]) => now - at < hour).length >= hourlyLimit)
-        return { state: 'reject', reason: 'rate limit: 12 requests per hour' };
+        return { state: 'reject', reason: `rate limit: ${hourlyLimit} requests per hour` };
       if (last.length >= siteDailyLimit)
-        return { state: 'reject', reason: 'rate limit: 6 requests per site per day' };
+        return {
+          state: 'reject',
+          reason: `rate limit: ${siteDailyLimit} requests per site per day`,
+        };
       if (recent.length >= totalDailyLimit)
-        return { state: 'reject', reason: 'rate limit: 24 requests per day' };
+        return { state: 'reject', reason: `rate limit: ${totalDailyLimit} requests per day` };
       return { state: 'ok' };
     },
     record(site, now) {
