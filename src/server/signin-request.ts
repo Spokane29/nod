@@ -50,12 +50,11 @@ export function signinMessage(url: string) {
 
 export async function ownerBusy(db: Pick<Pool, 'query'>, ownerId: string, exceptTurnId?: string) {
   const { rows } = await db.query<{ busy: boolean }>(
-    `SELECT (EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND ($2::uuid IS NULL OR u.id<>$2::uuid) AND (
-       u.status='running'
-       OR (u.status='queued' AND (u.source IN ('user','task','resume') OR to_jsonb(u)->>'task_id' IS NOT NULL))
-       OR (${waitingTurnSql('u')})))
+    `SELECT (EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND u.session_id=u.thread_id
+         AND ($2::uuid IS NULL OR u.id<>$2::uuid)
+         AND (u.status IN ('queued','running') OR (${waitingTurnSql('u')})))
        OR EXISTS (SELECT 1 FROM approvals a
-            JOIN turns t ON t.id=a.turn_id AND t.owner_id=a.owner_id
+            JOIN turns t ON t.id=a.turn_id AND t.owner_id=a.owner_id AND t.session_id=t.thread_id
             JOIN threads th ON th.id=a.thread_id AND th.archived_at IS NULL
           WHERE a.owner_id=$1 AND a.status='pending' AND t.status IN ('running','waiting'))) AS busy`,
     [ownerId, exceptTurnId ?? null],

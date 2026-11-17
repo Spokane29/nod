@@ -549,8 +549,14 @@ export function startSigninInbox(options) {
     }
     const waiting = async (reason) => {
       if (now - seen > deferralMs) {
+        noted.delete(identity);
         await reject(name, result.site, reason, identity);
         return 'done';
+      }
+      if (!noted.has(identity)) {
+        if (noted.size > 1000) noted.clear();
+        noted.add(identity);
+        await log(result.site, 'waiting', reason.replace(' for 15 minutes', ''));
       }
       return 'deferred';
     };

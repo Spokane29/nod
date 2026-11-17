@@ -187,7 +187,7 @@ test('the outcome route reports the turn and the sign-in state', async () => {
 });
 
 test(
-  'busy covers queued and running owner turns and anything waiting for the owner',
+  'busy covers the main conversation only: its queued, running and waiting turns',
   { skip: !process.env.TEST_DATABASE_URL },
   async (t) => {
     const schema = `test_signin_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
@@ -217,37 +217,37 @@ test(
         [randomUUID(), thread, session, source, status, reason],
       );
     assert.equal(await ownerBusy(db, 'owner'), false);
-    await add('schedule', 'queued', null, randomUUID());
-    await add('user', 'succeeded');
-    assert.equal(await ownerBusy(db, 'owner'), false);
-    for (const source of ['user', 'event', 'schedule']) {
-      await db.query("UPDATE turns SET status='succeeded' WHERE status='running'");
-      await add(source, 'running', null, randomUUID());
-      assert.equal(await ownerBusy(db, 'owner'), true, source);
+    for (const status of ['queued', 'running']) {
+      await add('task', status, null, randomUUID());
+      await add('schedule', status, null, randomUUID());
     }
-    await db.query("UPDATE turns SET status='succeeded'");
-    assert.equal(await ownerBusy(db, 'owner'), false);
+    await add('task', 'waiting', 'question', randomUUID());
+    await add('user', 'succeeded');
+    assert.equal(await ownerBusy(db, 'owner'), false, 'work in other sessions does not block');
+    for (const status of ['queued', 'running']) {
+      await db.query('DELETE FROM turns');
+      await add('user', status);
+      assert.equal(await ownerBusy(db, 'owner'), true, status);
+    }
+    await db.query('DELETE FROM turns');
     const asking = randomUUID();
-    await db.query(
-      `INSERT INTO turns(id,owner_id,thread_id,session_id,source,status,started_at)
-       VALUES($1,'owner',$2,$3,'schedule','running',now())`,
-      [asking, thread, randomUUID()],
-    );
+    const ask = (session: string, status: string) =>
+      db.query(
+        `INSERT INTO turns(id,owner_id,thread_id,session_id,source,status,started_at)
+         VALUES($1,'owner',$2,$3,'user',$4,now())`,
+        [asking, thread, session, status],
+      );
+    await ask(randomUUID(), 'waiting');
     const approval = randomUUID();
     await db.query(
       "INSERT INTO approvals(id,owner_id,thread_id,turn_id,status) VALUES($1,'owner',$2,$3,'pending')",
       [approval, thread, asking],
     );
-    await db.query(
-      "INSERT INTO approvals(id,owner_id,thread_id,turn_id,status) VALUES($1,'other',$2,$3,'pending')",
-      [randomUUID(), thread, asking],
-    );
-    assert.equal(await ownerBusy(db, 'owner'), true);
-    await db.query("UPDATE turns SET status='cancelled' WHERE id=$1", [asking]);
+    assert.equal(await ownerBusy(db, 'owner'), false, 'an approval in a task session');
+    await db.query('DELETE FROM turns');
+    await ask(thread, 'cancelled');
     assert.equal(await ownerBusy(db, 'owner'), false, 'a stopped turn leaves no busy approval');
-    await db.query("UPDATE turns SET status='waiting', waiting_reason='approval' WHERE id=$1", [
-      asking,
-    ]);
+    await db.query("UPDATE turns SET status='running' WHERE id=$1", [asking]);
     assert.equal(await ownerBusy(db, 'owner'), true);
     await db.query("UPDATE approvals SET status='approved' WHERE id=$1", [approval]);
     await db.query("UPDATE turns SET status='succeeded'");
