@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import {
   link,
   mkdir,
@@ -179,6 +179,69 @@ test('a hold without asking needs an approved site, a valid signature and clean 
       validateRequest(request({}, key, { ...family, ages }), sites, holds).reason,
       'bad hold details',
     );
+  const sign = (lines) =>
+    createHmac('sha256', key)
+      .update(['ncl', 'autohold', 'Q-5JXW', ...lines].join('\n'))
+      .digest('hex');
+  const written = {
+    ship: ' Sun  Princess ',
+    sailDate: '2027-03-14',
+    category: 'BF',
+    guests: '4',
+    maxTotal: '1200.00',
+    currency: 'usd',
+    yesId: 'yes-1042',
+    ages: ['38', 36, 9, 6],
+  };
+  const tidyHold = {
+    ...hold,
+    guests: 4,
+    maxTotal: 1200,
+    ages: [38, 36, 9, 6],
+  };
+  for (const lines of [
+    [' Sun  Princess ', '2027-03-14', 'BF', '4', '1200.00', 'usd', 'yes-1042', '38,36,9,6'],
+    ['Sun Princess', '2027-03-14', 'BF', '4', '1200', 'USD', 'yes-1042', '38,36,9,6'],
+    ['Sun Princess', '2027-03-14', 'BF', '4', '1200.00', 'USD', 'yes-1042', '38,36,9,6'],
+    ['Sun Princess', '2027-03-14', 'BF', '4', '1200.0', 'usd', 'yes-1042', '38,36,9,6'],
+  ]) {
+    const loose = validateRequest(
+      JSON.stringify({
+        site: 'ncl',
+        job: 'autohold',
+        ref: 'Q-5JXW',
+        hold: written,
+        sig: ` ${sign(lines).toUpperCase()} `,
+      }),
+      sites,
+      holds,
+    );
+    assert.equal(loose.ok, true, lines.join('|'));
+    assert.deepEqual(loose.hold, tidyHold);
+  }
+  assert.equal(
+    validateRequest(
+      JSON.stringify({
+        site: 'ncl',
+        job: 'autohold',
+        ref: 'Q-5JXW',
+        hold: written,
+        sig: sign([
+          'Sun Princess',
+          '2027-03-14',
+          'BF',
+          '4',
+          '1300',
+          'USD',
+          'yes-1042',
+          '38,36,9,6',
+        ]),
+      }),
+      sites,
+      holds,
+    ).reason,
+    'the request signature is missing or wrong',
+  );
   const release = { site: 'ncl', job: 'release', ref: 'ABC123' };
   const signedRelease = JSON.stringify({
     ...release,

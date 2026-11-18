@@ -107,12 +107,26 @@ const signedJobs = new Set(['autohold', 'release']);
 const holdText = /^[A-Za-z0-9][A-Za-z0-9 .'&/-]{0,59}$/;
 const holdFields = ['ship', 'sailDate', 'category', 'guests', 'maxTotal', 'currency', 'yesId'];
 
+const tidy = (value) => (typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : value);
+const numeric = (value, shape) =>
+  typeof value === 'string' && shape.test(value.trim()) ? Number(value.trim()) : value;
+
 export function holdDetails(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const keys = Object.keys(value).filter((key) => key !== 'ages');
   if (keys.length !== holdFields.length || !holdFields.every((key) => keys.includes(key)))
     return undefined;
-  const { ship, sailDate, category, guests, maxTotal, currency, yesId, ages } = value;
+  const ship = tidy(value.ship);
+  const sailDate = tidy(value.sailDate);
+  const category = tidy(value.category);
+  const yesId = tidy(value.yesId);
+  const currency =
+    typeof value.currency === 'string' ? tidy(value.currency).toUpperCase() : value.currency;
+  const guests = numeric(value.guests, /^\d{1,2}$/);
+  const maxTotal = numeric(value.maxTotal, /^\d{1,7}(\.\d{1,2})?$/);
+  const ages = Array.isArray(value.ages)
+    ? value.ages.map((age) => numeric(age, /^\d{1,3}$/))
+    : value.ages;
   if (
     ages !== undefined &&
     (!Array.isArray(ages) ||
@@ -155,11 +169,37 @@ export function holdSignature(key, site, job, ref, hold) {
   return createHmac('sha256', key).update(lines.join('\n')).digest('hex');
 }
 
+function holdTexts(raw, hold) {
+  const amount = hold.maxTotal;
+  const choices = holdFields.map((field) => [
+    ...new Set([
+      String(raw[field]),
+      String(hold[field]),
+      ...(field === 'maxTotal' ? [amount.toFixed(2), amount.toFixed(1)] : []),
+    ]),
+  ]);
+  if (hold.ages) choices.push([...new Set([raw.ages.map(String).join(','), hold.ages.join(',')])]);
+  return choices.reduce(
+    (texts, options) => texts.flatMap((text) => options.map((option) => [...text, option])),
+    [[]],
+  );
+}
+
 function signed(key, data, hold) {
   if (typeof key !== 'string' || key.length < 32 || typeof data.sig !== 'string') return false;
-  const expected = Buffer.from(holdSignature(key, data.site, data.job, data.ref, hold));
-  const given = Buffer.from(data.sig);
-  return given.length === expected.length && timingSafeEqual(given, expected);
+  const given = Buffer.from(data.sig.trim().toLowerCase());
+  const head = [data.site, data.job, data.ref];
+  const texts = hold ? holdTexts(data.hold, hold) : [['']];
+  let match = false;
+  for (const text of texts) {
+    const expected = Buffer.from(
+      createHmac('sha256', key)
+        .update([...head, ...text].join('\n'))
+        .digest('hex'),
+    );
+    if (given.length === expected.length && timingSafeEqual(given, expected)) match = true;
+  }
+  return match;
 }
 
 export function validateRequest(text, sites, holds = {}) {
