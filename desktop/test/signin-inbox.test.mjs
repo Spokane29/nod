@@ -168,6 +168,17 @@ test('a hold without asking needs an approved site, a valid signature and clean 
       validateRequest(request({}, key, details), sites, holds).reason,
       'bad hold details',
     );
+  const family = { ...hold, guests: 3, ages: [38, 36, 9] };
+  assert.deepEqual(validateRequest(request({}, key, family), sites, holds).hold, family);
+  assert.notEqual(
+    holdSignature(key, 'ncl', 'autohold', 'Q-5JXW', family),
+    holdSignature(key, 'ncl', 'autohold', 'Q-5JXW', { ...family, ages: [38, 36, 19] }),
+  );
+  for (const ages of [[38, 36], [38, 36, -1], [38, 36, 9.5], 'three'])
+    assert.equal(
+      validateRequest(request({}, key, { ...family, ages }), sites, holds).reason,
+      'bad hold details',
+    );
   const release = { site: 'ncl', job: 'release', ref: 'ABC123' };
   const signedRelease = JSON.stringify({
     ...release,

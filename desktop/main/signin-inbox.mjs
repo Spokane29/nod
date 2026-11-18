@@ -109,10 +109,17 @@ const holdFields = ['ship', 'sailDate', 'category', 'guests', 'maxTotal', 'curre
 
 export function holdDetails(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-  const keys = Object.keys(value);
+  const keys = Object.keys(value).filter((key) => key !== 'ages');
   if (keys.length !== holdFields.length || !holdFields.every((key) => keys.includes(key)))
     return undefined;
-  const { ship, sailDate, category, guests, maxTotal, currency, yesId } = value;
+  const { ship, sailDate, category, guests, maxTotal, currency, yesId, ages } = value;
+  if (
+    ages !== undefined &&
+    (!Array.isArray(ages) ||
+      ages.length !== guests ||
+      !ages.every((age) => Number.isInteger(age) && age >= 0 && age <= 120))
+  )
+    return undefined;
   const date = typeof sailDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(sailDate);
   if (
     typeof ship !== 'string' ||
@@ -134,11 +141,17 @@ export function holdDetails(value) {
     !/^[A-Za-z0-9][A-Za-z0-9-]{2,39}$/.test(yesId)
   )
     return undefined;
-  return { ship, sailDate, category, guests, maxTotal, currency, yesId };
+  return { ship, sailDate, category, guests, maxTotal, currency, yesId, ...(ages ? { ages } : {}) };
 }
 
 export function holdSignature(key, site, job, ref, hold) {
-  const lines = [site, job, ref, ...(hold ? holdFields.map((field) => String(hold[field])) : [''])];
+  const lines = [
+    site,
+    job,
+    ref,
+    ...(hold ? holdFields.map((field) => String(hold[field])) : ['']),
+    ...(Array.isArray(hold?.ages) ? [hold.ages.join(',')] : []),
+  ];
   return createHmac('sha256', key).update(lines.join('\n')).digest('hex');
 }
 

@@ -211,6 +211,13 @@ test('a no-ask hold needs its details and tells Nod when to stop', async () => {
   assert.equal(submitted.length, 0);
   assert.equal((await post({ url, job: 'autohold', ref: 'Q-5JXW', hold })).statusCode, 200);
   assert.equal(submitted[0]!.text, text);
+  const family = { ...hold, guests: 4, ages: [38, 36, 9, 6] };
+  assert.ok(jobMessage('autohold', url, 'Q-5JXW', undefined, family).includes('`38, 36, 9, 6`'));
+  assert.notEqual(
+    (await post({ url, job: 'autohold', ref: 'Q-6AAA', hold: { ...family, ages: [38, 36] } }))
+      .statusCode,
+    200,
+  );
 });
 
 test('the route refuses other addresses and extra fields', async () => {
