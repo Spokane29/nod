@@ -2514,6 +2514,10 @@ async function startEngine({ runtime, signal, pending = false }) {
     process.env.NOD_PORTAL_PARALLEL ??
     (await readFile(join(app.getPath('userData'), 'portal-parallel'), 'utf8').catch(() => ''))
   ).trim();
+  const invoiceFolder = (
+    process.env.NOD_INVOICE_FOLDER ??
+    (await readFile(join(app.getPath('userData'), 'invoice-folder'), 'utf8').catch(() => ''))
+  ).trim();
   const build = buildIdentity(nodBuild);
   const started = Date.now();
   const environment = {
@@ -2541,6 +2545,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     ...(browserExecutable ? { NOD_BROWSER_EXECUTABLE: browserExecutable } : {}),
     ...(browserCdp ? { NOD_BROWSER_CDP: browserCdp } : {}),
     ...(/^[1-3]$/.test(portalParallel) ? { NOD_PORTAL_PARALLEL: portalParallel } : {}),
+    ...(invoiceFolder ? { NOD_INVOICE_FOLDER: invoiceFolder } : {}),
     ...(process.env.NOD_FEEDBACK_URL === '' ? { NOD_FEEDBACK_ENABLED: 'false' } : {}),
     ...(tracesToken ? { NOD_TRACES_TOKEN: tracesToken } : {}),
     PI_CODING_AGENT_DIR: join(profileRoot, 'pi'),

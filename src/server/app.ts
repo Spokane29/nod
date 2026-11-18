@@ -60,6 +60,7 @@ import type {
 } from '../shared/contracts.ts';
 import type { createChatVerification } from './chat-verification.ts';
 import {
+  invoiceFolder,
   ownerBusy,
   portalParallel,
   portalRunning,
@@ -348,6 +349,7 @@ export async function createApp(dependencies: AppDependencies = {}) {
       ownerId,
       ready: () => publicConfiguration().llmReady,
       parallel: portalParallel(process.env.NOD_PORTAL_PARALLEL),
+      invoiceFolder: invoiceFolder(process.env.NOD_INVOICE_FOLDER),
       submit: (text, attachments, input) => submitUserMessage(text, attachments, input),
     });
   }

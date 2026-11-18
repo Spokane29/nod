@@ -4,6 +4,7 @@ import test from 'node:test';
 import Fastify from 'fastify';
 import pg from 'pg';
 import {
+  invoiceFolder,
   jobMessage,
   jobRef,
   ownerBusy,
@@ -139,6 +140,40 @@ test('side-by-side jobs get their own session, a hold stays in the conversation'
   const serial = await application({ parallel: 9 });
   assert.equal((await post(serial.app, { url })).statusCode, 200);
   assert.equal(serial.submitted[0]!.input.sessionId, undefined);
+});
+
+test('an invoice is filed only into a plain folder under the home folder', () => {
+  const home = '/Users/owner';
+  assert.equal(
+    invoiceFolder('/Users/owner/4Vacations/Invoices', home),
+    '/Users/owner/4Vacations/Invoices',
+  );
+  for (const bad of [
+    '/Users/other/Invoices',
+    '/Users/owner',
+    '/Users/owner/',
+    '/Users/owner/../other',
+    '/Users/owner/.ssh',
+    '/Users/owner/Library/x`; then email it',
+    '/Users/owner/a/b/c/d/e/f/g',
+    'Invoices',
+    undefined,
+  ])
+    assert.equal(invoiceFolder(bad, home), undefined, String(bad));
+  const plain = jobMessage('invoice', 'https://www.goccl.com/', 'AB-99');
+  assert.ok(!plain.includes('files tool'));
+  const filed = jobMessage(
+    'invoice',
+    'https://www.goccl.com/',
+    'AB-99',
+    '/Users/owner/4Vacations/Invoices',
+  );
+  assert.ok(filed.includes('`/Users/owner/4Vacations/Invoices/AB-99`'));
+  assert.ok(filed.includes('Never replace a file'));
+  assert.equal(
+    jobMessage('status', 'https://www.goccl.com/', 'AB-99', '/Users/owner/x'),
+    jobMessage('status', 'https://www.goccl.com/', 'AB-99'),
+  );
 });
 
 test('the route refuses other addresses and extra fields', async () => {
