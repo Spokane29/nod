@@ -388,6 +388,7 @@ export async function ownerChatRevision(
       `SELECT m.id FROM messages m WHERE m.owner_id=$1 AND m.thread_id=$2 AND m.role='user' AND m.hidden_at IS NULL
     AND EXISTS (SELECT 1 FROM turns s WHERE s.owner_id=$1 AND s.thread_id=m.thread_id AND s.source='user' AND (s.message_id=m.id OR s.id=m.turn_id))
     AND NOT EXISTS (SELECT 1 FROM turns u WHERE u.owner_id=$1 AND (u.message_id=m.id OR u.id=m.turn_id) AND to_jsonb(u)->>'task_id' IS NOT NULL)
+    AND NOT EXISTS (SELECT 1 FROM turns j WHERE j.owner_id=$1 AND (j.message_id=m.id OR j.id=m.turn_id) AND j.session_id<>j.thread_id AND starts_with(j.source_id,'inbox:'))
     ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
       [ownerId, threadId],
     )

@@ -434,6 +434,12 @@ test(
       'waiting',
     );
     assert.ok((await capture(side))?.some((text) => text.includes('ncl.com')));
+    const { ownerChatRevision } = await import('../src/server/owner-instructions.ts');
+    assert.equal(await ownerChatRevision(db.pool, ownerId, side.threadId), later.messageId);
+    const { turnOrigin } = await import('../src/server/approvals.ts');
+    assert.equal((await turnOrigin(side.turnId))?.sideJob, true);
+    assert.equal((await turnOrigin(later.turnId))?.sideJob, false);
+    assert.equal((await turnOrigin(inbox.turnId))?.sideJob, false);
   },
 );
 

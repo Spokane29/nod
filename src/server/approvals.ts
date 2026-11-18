@@ -101,6 +101,8 @@ type TurnRow = {
   prompt: string;
   background: boolean;
   channel: string;
+  session_id: string | null;
+  source_id: string | null;
 };
 
 const notRun = (error: unknown) =>
@@ -143,7 +145,7 @@ function confirmedOutcome(
 async function turnRow(client: PoolClient, turnId: string) {
   return (
     await client.query<TurnRow>(
-      "SELECT id,thread_id,to_jsonb(turns)->>'task_id' AS task_id,source,parent_turn_id,message_id,prompt,background,channel FROM turns WHERE id=$1 AND owner_id=$2",
+      "SELECT id,thread_id,to_jsonb(turns)->>'task_id' AS task_id,source,parent_turn_id,message_id,prompt,background,channel,session_id,source_id FROM turns WHERE id=$1 AND owner_id=$2",
       [turnId, ownerId],
     )
   ).rows[0];
@@ -247,6 +249,8 @@ export async function turnOrigin(turnId: string) {
     return {
       taskId: current.task_id,
       source: origin.source,
+      sideJob:
+        origin.session_id !== origin.thread_id && (origin.source_id ?? '').startsWith('inbox:'),
       messageIds: said,
       channel: current.channel,
       scheduleInstruction: run?.authority ?? undefined,

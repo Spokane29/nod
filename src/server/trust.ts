@@ -107,7 +107,7 @@ export function createTrust(options: {
             )
           : undefined;
       const chatRevision =
-        origin.source === 'user' && !origin.taskId
+        origin.source === 'user' && !origin.taskId && !origin.sideJob
           ? await ownerChatRevision(pool, ownerId, turn.threadId)
           : undefined;
       const words: TrustWords = {
