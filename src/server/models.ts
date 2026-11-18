@@ -1203,7 +1203,11 @@ export function createModelService(options: {
       const policy = loadModelPolicy();
       const explicit = origin.task || (origin.kind === 'schedule' && origin.schedule);
       if (policy && !explicit) {
-        const lane = origin.portal ? (origin.portal === 'hold' ? 'hold' : 'portal') : origin.kind;
+        const lane = origin.portal
+          ? ['hold', 'autohold', 'release'].includes(origin.portal)
+            ? 'hold'
+            : 'portal'
+          : origin.kind;
         const pick = policyChoice(policy, lane, rows);
         if (pick) return { selection: pick, follows: origin.kind === 'chat' ? 'chat' : 'lane' };
       }

@@ -1097,7 +1097,9 @@ export async function workOrigin(turnId: string, client: Pool | PoolClient = poo
       [turnId, ownerId],
     )
   ).rows[0];
-  const portal = /^inbox:(?:(signin|status|invoice|hold):)?/.exec(row?.source_id ?? '');
+  const portal = /^inbox:(?:(signin|status|invoice|hold|autohold|release):)?/.exec(
+    row?.source_id ?? '',
+  );
   return (
     row && {
       kind: row.kind,

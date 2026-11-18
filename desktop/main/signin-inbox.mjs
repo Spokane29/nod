@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { constants, watch } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
@@ -12,6 +12,8 @@ export const siteDailyLimit = 16;
 export const totalDailyLimit = 60;
 export const deferralMs = 15 * 60_000;
 export const unconfirmedLimit = 2;
+export const autoholdDailyLimit = 5;
+export const holdKeyFile = 'autohold-key';
 export const dialogTitle = 'Allow sign-in requests?';
 export const allowFile = 'signin-allow.json';
 export const approvedFile = 'signin-allow.approved';
@@ -86,20 +88,68 @@ export function parseAllowList(text) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return undefined;
   if (!data.sites || typeof data.sites !== 'object' || Array.isArray(data.sites)) return undefined;
   const sites = new Map();
+  const autohold = new Set();
   const skipped = [];
   for (const [key, entry] of Object.entries(data.sites)) {
     const url =
       siteKey.test(key) && entry && typeof entry === 'object' ? signinUrl(entry.url) : undefined;
-    if (url) sites.set(key, url);
-    else skipped.push(key.slice(0, 20));
+    if (url) {
+      sites.set(key, url);
+      if (entry.autohold === true) autohold.add(key);
+    } else skipped.push(key.slice(0, 20));
   }
-  return { sites, skipped };
+  return { sites, skipped, autohold };
 }
 
-export const portalJobs = ['signin', 'status', 'invoice', 'hold'];
+export const portalJobs = ['signin', 'status', 'invoice', 'hold', 'autohold', 'release'];
 const bookingRef = /^[A-Za-z0-9][A-Za-z0-9-]{2,23}$/;
+const signedJobs = new Set(['autohold', 'release']);
+const holdText = /^[A-Za-z0-9][A-Za-z0-9 .'&/-]{0,59}$/;
+const holdFields = ['ship', 'sailDate', 'category', 'guests', 'maxTotal', 'currency', 'yesId'];
 
-export function validateRequest(text, sites) {
+export function holdDetails(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value);
+  if (keys.length !== holdFields.length || !holdFields.every((key) => keys.includes(key)))
+    return undefined;
+  const { ship, sailDate, category, guests, maxTotal, currency, yesId } = value;
+  const date = typeof sailDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(sailDate);
+  if (
+    typeof ship !== 'string' ||
+    !holdText.test(ship) ||
+    typeof category !== 'string' ||
+    !holdText.test(category) ||
+    !date ||
+    Number.isNaN(Date.parse(`${sailDate}T00:00:00Z`)) ||
+    !Number.isInteger(guests) ||
+    guests < 1 ||
+    guests > 9 ||
+    typeof maxTotal !== 'number' ||
+    !(maxTotal > 0) ||
+    maxTotal > 1_000_000 ||
+    !/^\d+(\.\d{1,2})?$/.test(String(maxTotal)) ||
+    typeof currency !== 'string' ||
+    !/^[A-Z]{3}$/.test(currency) ||
+    typeof yesId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9-]{2,39}$/.test(yesId)
+  )
+    return undefined;
+  return { ship, sailDate, category, guests, maxTotal, currency, yesId };
+}
+
+export function holdSignature(key, site, job, ref, hold) {
+  const lines = [site, job, ref, ...(hold ? holdFields.map((field) => String(hold[field])) : [''])];
+  return createHmac('sha256', key).update(lines.join('\n')).digest('hex');
+}
+
+function signed(key, data, hold) {
+  if (typeof key !== 'string' || key.length < 32 || typeof data.sig !== 'string') return false;
+  const expected = Buffer.from(holdSignature(key, data.site, data.job, data.ref, hold));
+  const given = Buffer.from(data.sig);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
+export function validateRequest(text, sites, holds = {}) {
   if (typeof text !== 'string' || Buffer.byteLength(text) > requestBytes)
     return { ok: false, reason: 'request too large' };
   let data;
@@ -112,14 +162,30 @@ export function validateRequest(text, sites) {
     return { ok: false, reason: 'not a JSON object' };
   if (typeof data.site !== 'string' || !siteKey.test(data.site))
     return { ok: false, reason: 'bad site key' };
-  if (Object.keys(data).some((key) => !['site', 'job', 'ref'].includes(key)))
+  const job = data.job ?? 'signin';
+  if (!portalJobs.includes(job)) return { ok: false, site: data.site, reason: 'unknown job' };
+  const fields = signedJobs.has(job)
+    ? ['site', 'job', 'ref', 'sig', ...(job === 'autohold' ? ['hold'] : [])]
+    : ['site', 'job', 'ref'];
+  if (Object.keys(data).some((key) => !fields.includes(key)))
     return {
       ok: false,
       site: data.site,
-      reason: 'unknown field; only site, job and ref are allowed',
+      reason: `unknown field; only ${fields.join(', ')} are allowed`,
     };
-  const job = data.job ?? 'signin';
-  if (!portalJobs.includes(job)) return { ok: false, site: data.site, reason: 'unknown job' };
+  let hold;
+  if (signedJobs.has(job)) {
+    if (!holds.sites?.has(data.site))
+      return { ok: false, site: data.site, reason: 'this site may not hold without asking' };
+    if (typeof data.ref !== 'string' || !bookingRef.test(data.ref))
+      return { ok: false, site: data.site, reason: `bad ref for ${job}` };
+    if (job === 'autohold') {
+      hold = holdDetails(data.hold);
+      if (!hold) return { ok: false, site: data.site, reason: 'bad hold details' };
+    }
+    if (!signed(holds.key, data, hold))
+      return { ok: false, site: data.site, reason: 'the request signature is missing or wrong' };
+  }
   let ref;
   if (job === 'signin') {
     if (data.ref !== undefined)
@@ -142,6 +208,7 @@ export function validateRequest(text, sites) {
     url,
     job,
     ...(ref ? { ref } : {}),
+    ...(hold ? { hold } : {}),
     key: job === 'signin' ? data.site : `${data.site}.${job}`,
   };
 }
@@ -246,14 +313,18 @@ export function hasQuarantine(path) {
   );
 }
 
-export function allowListDialog(sites) {
+export function allowListDialog(sites, autohold) {
   return {
     title: dialogTitle,
     detail: `Other programs on this computer will be able to ask Nod to open these pages and sign in with the saved Vault login, with no one in the chat:\n\n${[
       ...sites,
     ]
       .map(([key, url]) => `${key}   ${url}`)
-      .join('\n')}\n\nNothing else can be requested this way.`,
+      .join('\n')}\n\n${
+      autohold?.size
+        ? `HOLDS WITHOUT ASKING: on ${[...autohold].join(', ')}, a signed request can make Nod place a courtesy hold or release one it placed, without asking you first (at most ${autoholdDailyLimit} holds a day, never a payment).\n\n`
+        : ''
+    }Nothing else can be requested this way.`,
     buttons: ['Allow', 'Keep off'],
     defaultId: 1,
     cancelId: 1,
@@ -277,11 +348,12 @@ export async function loadAllowList(options) {
   } catch {
     opened = undefined;
   }
-  if (opened === hash) return { sites: parsed.sites, skipped: parsed.skipped };
-  const answer = await showDialog(allowListDialog(parsed.sites));
+  if (opened === hash)
+    return { sites: parsed.sites, skipped: parsed.skipped, autohold: parsed.autohold };
+  const answer = await showDialog(allowListDialog(parsed.sites, parsed.autohold));
   if (answer !== 0) return { reason: 'the allow-list was not approved' };
   await writeAtomic(join(dataDir, approvedFile), `${await seal(hash)}\n`);
-  return { sites: parsed.sites, skipped: parsed.skipped };
+  return { sites: parsed.sites, skipped: parsed.skipped, autohold: parsed.autohold };
 }
 
 export const statusFile = 'status.json';
@@ -325,14 +397,14 @@ export async function prepareSigninInbox(options) {
   if (!loaded.sites) return off(loaded.reason);
   if (loaded.skipped.length) diagnostic('Sign-in inbox ignored invalid allow-list entries.');
   await status({ state: 'on', reason: null, inbox, sites: [...loaded.sites.keys()] });
-  return { inbox, sites: loaded.sites, dataDir };
+  return { inbox, sites: loaded.sites, autohold: loaded.autohold, dataDir };
 }
 
 export function createGate(options) {
   const { file } = options;
   const clock = options.now ?? Date.now;
   const siteMs = options.siteMs ?? siteIntervalMs;
-  let state = { accepted: [], strikes: {}, blocked: {}, pending: {} };
+  let state = { accepted: [], strikes: {}, blocked: {}, pending: {}, held: {}, placed: {} };
   let holdUntil = 0;
   let unsaved = false;
   return {
@@ -356,6 +428,8 @@ export function createGate(options) {
           strikes: data.strikes && typeof data.strikes === 'object' ? data.strikes : {},
           blocked: data.blocked && typeof data.blocked === 'object' ? data.blocked : {},
           pending: data.pending && typeof data.pending === 'object' ? data.pending : {},
+          held: data.held && typeof data.held === 'object' ? data.held : {},
+          placed: data.placed && typeof data.placed === 'object' ? data.placed : {},
         };
       } else {
         holdUntil = clock() + siteMs;
@@ -374,8 +448,21 @@ export function createGate(options) {
       state.accepted = state.accepted.filter(([, at]) => now - at < day);
       await writeAtomic(file, JSON.stringify(state));
     },
-    check(site, now) {
+    check(site, now, ref) {
       if (now < holdUntil) return { state: 'wait' };
+      if (site.endsWith('.autohold')) {
+        if (state.held[ref]) return { state: 'reject', reason: 'this quote was already held once' };
+        const today = state.accepted.filter(
+          ([name, at]) => name.endsWith('.autohold') && now - at < day,
+        );
+        if (today.length >= autoholdDailyLimit)
+          return {
+            state: 'reject',
+            reason: `rate limit: ${autoholdDailyLimit} holds without asking per day`,
+          };
+      }
+      if (site.endsWith('.release') && state.placed[ref] !== site.split('.')[0])
+        return { state: 'reject', reason: 'nod did not place this booking' };
       if (state.blocked[site])
         return {
           state: 'reject',
@@ -399,8 +486,13 @@ export function createGate(options) {
     record(site, now) {
       state.accepted.push([site, now]);
     },
-    track(site, turnId, now) {
-      state.pending[site] = { turnId, at: now };
+    track(site, turnId, now, ref) {
+      state.pending[site] = { turnId, at: now, ...(ref ? { ref } : {}) };
+      if (site.endsWith('.autohold') && ref) state.held[ref] = now;
+    },
+    placed(site, booking) {
+      if (booking) state.placed[booking] = site;
+      else delete state.placed[site];
     },
     settle(site, confirmed) {
       delete state.pending[site];
@@ -419,13 +511,28 @@ export function createGate(options) {
   };
 }
 
-export function outcomeConfirmed(outcome) {
-  return (
-    outcome?.turn === 'succeeded' && (outcome.signin === 'submitted' || outcome.signin === 'none')
-  );
+export function heldBooking(reply) {
+  return /^BOOKING ([A-Za-z0-9][A-Za-z0-9-]{2,23}) EXPIRES \S/m.exec(
+    typeof reply === 'string' ? reply : '',
+  )?.[1];
+}
+
+export function outcomeConfirmed(outcome, key = '', ref = '') {
+  if (
+    outcome?.turn !== 'succeeded' ||
+    !(outcome.signin === 'submitted' || outcome.signin === 'none')
+  )
+    return false;
+  if (key.endsWith('.autohold')) return Boolean(heldBooking(outcome.reply));
+  if (key.endsWith('.release'))
+    return String(outcome.reply ?? '')
+      .split('\n')
+      .some((line) => line.trim() === `RELEASED ${ref}`);
+  return true;
 }
 
 const finished = new Set(['succeeded', 'failed', 'cancelled', 'waiting']);
+const signedRequest = /"job"\s*:\s*"(autohold|release)"/;
 
 export function startSigninInbox(options) {
   const { inbox, sites, request, isIdle } = options;
@@ -591,7 +698,10 @@ export function startSigninInbox(options) {
       await reject(name, '', 'file is quarantined', identity);
       return 'done';
     }
-    const result = validateRequest(text, sites);
+    const result = validateRequest(text, sites, {
+      sites: options.autohold,
+      key: signedRequest.test(text) ? await options.holdKey?.().catch(() => undefined) : undefined,
+    });
     if (!result.ok) {
       await reject(
         name,
@@ -601,7 +711,7 @@ export function startSigninInbox(options) {
       );
       return 'done';
     }
-    const decision = gate.check(result.key, now);
+    const decision = gate.check(result.key, now, result.ref);
     if (decision.state === 'reject') {
       await reject(name, result.key, decision.reason, identity);
       return 'done';
@@ -670,6 +780,7 @@ export function startSigninInbox(options) {
             url: result.url,
             job: result.job,
             ...(result.ref ? { ref: result.ref } : {}),
+            ...(result.hold ? { hold: result.hold } : {}),
           }),
           signal: AbortSignal.timeout(30_000),
         });
@@ -701,7 +812,7 @@ export function startSigninInbox(options) {
       await log(result.key, 'rejected', failure);
       return 'done';
     }
-    if (typeof posted.turnId === 'string') gate.track(result.key, posted.turnId, now);
+    if (typeof posted.turnId === 'string') gate.track(result.key, posted.turnId, now, result.ref);
     await gate.save().catch(() => {});
     await writeNew(
       join(acceptedDirectory, `${base}.result.json`),
@@ -743,7 +854,7 @@ export function startSigninInbox(options) {
   async function settle() {
     if (!options.outcome) return false;
     let waiting = false;
-    for (const [key, { turnId, at }] of Object.entries(gate.state.pending)) {
+    for (const [key, { turnId, at, ref }] of Object.entries(gate.state.pending)) {
       const hold = key.endsWith('.hold');
       let outcome;
       try {
@@ -756,7 +867,10 @@ export function startSigninInbox(options) {
         waiting = true;
         continue;
       }
-      const confirmed = Boolean(done) && outcomeConfirmed(outcome);
+      const confirmed = Boolean(done) && outcomeConfirmed(outcome, key, ref);
+      if (confirmed && key.endsWith('.autohold'))
+        gate.placed(key.split('.')[0], heldBooking(outcome.reply));
+      if (confirmed && key.endsWith('.release')) gate.placed(ref);
       gate.settle(key, confirmed);
       await gate.save().catch(() => {});
       await saveReply(key, turnId, outcome, confirmed);

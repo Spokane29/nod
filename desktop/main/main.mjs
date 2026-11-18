@@ -606,6 +606,7 @@ async function startSigninInboxFromSettings() {
     request: (path, options) => engineRequest(path, options),
     isIdle: engineIdle,
     outcome: signinOutcome,
+    holdKey: async () => (await readFile(join(dataDir, 'autohold-key'), 'utf8')).trim(),
   }).stop;
 }
 
