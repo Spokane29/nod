@@ -7,6 +7,7 @@ import {
   jobMessage,
   jobRef,
   ownerBusy,
+  portalRunning,
   registerSigninRequests,
   signinMessage,
   signinSourcePrefix,
@@ -73,9 +74,10 @@ test('jobs need a clean reference and their messages keep the reference as data'
   );
 });
 
-function fakePool(busy: boolean, rows: Record<string, object[]> = {}) {
+function fakePool(busy: boolean, rows: Record<string, object[]> = {}, running = 0) {
   return {
     async query(sql: string) {
+      if (sql.includes('AS count')) return { rows: [{ count: running }] };
       if (sql.includes('AS busy')) return { rows: [{ busy }] };
       if (sql.includes('FROM turns WHERE id')) return { rows: rows.turn ?? [] };
       if (sql.includes('FROM tasks')) return { rows: rows.tasks ?? [] };
@@ -85,13 +87,21 @@ function fakePool(busy: boolean, rows: Record<string, object[]> = {}) {
   };
 }
 
-async function application(options: { busy?: boolean; rows?: Record<string, object[]> } = {}) {
+async function application(
+  options: {
+    busy?: boolean;
+    rows?: Record<string, object[]>;
+    parallel?: number;
+    running?: number;
+  } = {},
+) {
   const app = Fastify();
   const submitted: { text: string; input: Record<string, unknown> }[] = [];
   registerSigninRequests(app, {
-    pool: fakePool(options.busy ?? false, options.rows) as unknown as pg.Pool,
+    pool: fakePool(options.busy ?? false, options.rows, options.running) as unknown as pg.Pool,
     ownerId: 'owner',
     ready: () => true,
+    parallel: options.parallel,
     submit: async (text, _attachments, input) => {
       submitted.push({ text, input });
       return { threadId: randomUUID(), turnId: randomUUID(), messageId: randomUUID() };
@@ -112,6 +122,23 @@ test('the route posts the fixed message tagged as an inbox turn', async () => {
   assert.equal(submitted[0]!.text, signinMessage('https://secure.cruisingpower.com/'));
   assert.ok(String(submitted[0]!.input.sourceId).startsWith(signinSourcePrefix));
   assert.equal(submitted[0]!.input.channel, 'web');
+});
+
+test('side-by-side jobs get their own session, a hold stays in the conversation', async () => {
+  const post = (app: Awaited<ReturnType<typeof application>>['app'], payload: object) =>
+    app.inject({ method: 'POST', url: '/api/desktop/signin', payload });
+  const url = 'https://secure.cruisingpower.com/';
+  const two = await application({ parallel: 2, busy: true, running: 1 });
+  assert.equal((await post(two.app, { url })).statusCode, 200);
+  assert.match(String(two.submitted[0]!.input.sessionId), /^[0-9a-f-]{36}$/);
+  assert.equal((await post(two.app, { url, job: 'hold', ref: 'Q-5JXW' })).statusCode, 409);
+  const full = await application({ parallel: 2, running: 2 });
+  assert.equal((await post(full.app, { url })).statusCode, 409);
+  assert.equal((await post(full.app, { url, job: 'hold', ref: 'Q-5JXW' })).statusCode, 200);
+  assert.equal(full.submitted[0]!.input.sessionId, undefined);
+  const serial = await application({ parallel: 9 });
+  assert.equal((await post(serial.app, { url })).statusCode, 200);
+  assert.equal(serial.submitted[0]!.input.sessionId, undefined);
 });
 
 test('the route refuses other addresses and extra fields', async () => {
@@ -254,6 +281,22 @@ test(
         [randomUUID(), thread, session, source, status, reason],
       );
     assert.equal(await ownerBusy(db, 'owner'), false);
+    const job = (session: string, status: string, source: string | null) =>
+      db.query(
+        `INSERT INTO turns(id,owner_id,thread_id,session_id,source,source_id,status,started_at)
+         VALUES($1,'owner',$2,$3,'user',$4,$5,now())`,
+        [randomUUID(), thread, session, source, status],
+      );
+    const resumed = randomUUID();
+    await job(resumed, 'succeeded', 'inbox:signin:a');
+    await job(resumed, 'running', null);
+    await job(randomUUID(), 'queued', 'inbox:status:b');
+    await job(randomUUID(), 'waiting', 'inbox:invoice:c');
+    await job(randomUUID(), 'succeeded', 'inbox:signin:d');
+    await job(thread, 'running', 'inbox:hold:e');
+    await job(randomUUID(), 'running', 'telegram:1');
+    assert.equal(await portalRunning(db, 'owner'), 2);
+    await db.query('DELETE FROM turns');
     for (const status of ['queued', 'running']) {
       await add('task', status, null, randomUUID());
       await add('schedule', status, null, randomUUID());
@@ -364,6 +407,33 @@ test(
     assert.ok(!seen?.some((text) => text.includes('cruisingpower')));
     const own = await capture(inbox);
     assert.ok(own?.some((text) => text.includes('cruisingpower')));
+    await db.pool.query("UPDATE turns SET status='succeeded'");
+    await db.pool.query("UPDATE turns SET status='waiting',waiting_reason='question' WHERE id=$1", [
+      later.turnId,
+    ]);
+    const session = randomUUID();
+    const side = await thread.submitUserMessage('Open https://www.ncl.com/ in the browser.', [], {
+      channel: 'web',
+      sourceId: 'inbox:signin:side',
+      sessionId: session,
+    });
+    const row = (
+      await db.pool.query(
+        'SELECT session_id,background,parent_turn_id,status FROM turns WHERE id=$1',
+        [side.turnId],
+      )
+    ).rows[0];
+    assert.deepEqual(row, {
+      session_id: session,
+      background: true,
+      parent_turn_id: null,
+      status: 'queued',
+    });
+    assert.equal(
+      (await db.pool.query('SELECT status FROM turns WHERE id=$1', [later.turnId])).rows[0].status,
+      'waiting',
+    );
+    assert.ok((await capture(side))?.some((text) => text.includes('ncl.com')));
   },
 );
 

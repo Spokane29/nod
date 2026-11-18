@@ -544,7 +544,7 @@ function trackZoomFactor(window) {
     });
 }
 
-async function engineIdle() {
+async function engineIdle(job) {
   if (
     remoteConnection ||
     !engine ||
@@ -556,7 +556,10 @@ async function engineIdle() {
     return false;
   const response = await engineRequest('/api/desktop/status');
   if (!response.ok) return false;
-  return (await response.json()).busy === false;
+  const status = await response.json();
+  return job && job !== 'hold' && status.portalParallel > 1
+    ? status.portalSlots > 0
+    : status.busy === false;
 }
 
 async function signinOutcome(turnId) {
@@ -2507,6 +2510,10 @@ async function startEngine({ runtime, signal, pending = false }) {
     process.env.NOD_BROWSER_CDP ??
     (await readFile(join(app.getPath('userData'), 'browser-cdp'), 'utf8').catch(() => ''))
   ).trim();
+  const portalParallel = (
+    process.env.NOD_PORTAL_PARALLEL ??
+    (await readFile(join(app.getPath('userData'), 'portal-parallel'), 'utf8').catch(() => ''))
+  ).trim();
   const build = buildIdentity(nodBuild);
   const started = Date.now();
   const environment = {
@@ -2533,6 +2540,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     NOD_WEB_ROOT: join(engineRoot, 'dist', 'web'),
     ...(browserExecutable ? { NOD_BROWSER_EXECUTABLE: browserExecutable } : {}),
     ...(browserCdp ? { NOD_BROWSER_CDP: browserCdp } : {}),
+    ...(/^[1-3]$/.test(portalParallel) ? { NOD_PORTAL_PARALLEL: portalParallel } : {}),
     ...(process.env.NOD_FEEDBACK_URL === '' ? { NOD_FEEDBACK_ENABLED: 'false' } : {}),
     ...(tracesToken ? { NOD_TRACES_TOKEN: tracesToken } : {}),
     PI_CODING_AGENT_DIR: join(profileRoot, 'pi'),

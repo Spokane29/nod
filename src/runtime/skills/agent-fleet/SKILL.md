@@ -1,11 +1,11 @@
 ---
 name: agent-fleet
-description: Work with the owner's other agents and models through the local n8n app. Use to look up what the owner's other agents (Hermes, Claude Code, Codex) know, to save a durable fact for them, to hand a research question to a Hermes agent (live news and X, long reading, careful web research), to get a typed decision from Jev, or to run a long job on the free local model.
+description: Work with the owner's other agents and models through the local n8n app. Use to look up what the owner's other agents (Hermes, Claude Code, Codex) know, to save a durable fact for them, to hand a research question to a Hermes agent (live news and X, long reading, careful web research), to get a typed decision from Jev, to send the owner a Telegram message, text or email, or to run a long job on the free local model.
 ---
 
 # Agent fleet
 
-The owner runs other agents beside you. You reach them through four workflows in the connected local n8n app. Run them with n8n's workflow tools; each is a webhook workflow.
+The owner runs other agents beside you. You reach them through five workflows in the connected local n8n app. Run them with n8n's workflow tools; each is a webhook workflow.
 
 ## Search shared brain (for Nod)
 
@@ -28,6 +28,10 @@ If the lane you ask is unavailable (Grok runs out of weekly usage, for example),
 ## Ask Jev (for Nod)
 
 Jev is a decision-only model: it returns a label, a yes/no or a score with probabilities, never prose. Use it when the possible answers are known in advance and you need a fast, consistent call: what a customer message is about, how urgent it is, which team or portal handles it, whether a reply is a yes. Body: `{"state": "...", "questions": [{"type": "choice", "question": "...", "options": ["a", "b"]}, {"type": "yes-no", "question": "..."}, {"type": "score", "question": "...", "options": ["low", "medium", "high"]}]}`. Up to 5 questions. Keep `private` true (the default) for email and customer messages; it runs on the owner's computer. Never use Jev for writing, math, dates, money, legal notices, tenant screening or mortgage decisions. A probability under 0.7 means unsure: decide yourself or ask.
+
+## Send message to owner (for Nod)
+
+Reach the owner away from the computer. Body: `{"channel": "telegram" | "text" | "email", "text": "...", "subject": "..."}`; an email needs a subject. Telegram and texts go only to the owner. Email goes to the owner unless you add `"to"` with an address on the owner's approved list; any other address is refused, so leave `to` out. Use it only when the owner asked for it or when something needs them soon: a hold that expires, a payment due, a job that failed. Keep a text under 600 characters and lead with the fact and the deadline. Never put passwords, codes, card details or a customer's contact details in a message. The limit is 20 sends an hour.
 
 ## Long jobs on the local model
 

@@ -620,8 +620,14 @@ export function startSigninInbox(options) {
       return 'deferred';
     };
     if (decision.state === 'wait') return waiting('limits were unavailable for 15 minutes');
+    if (
+      Object.keys(gate.state.pending).some(
+        (key) => key === result.site || key.startsWith(`${result.site}.`),
+      )
+    )
+      return waiting('another job for this site was still running for 15 minutes');
     const idle = await Promise.resolve()
-      .then(isIdle)
+      .then(() => isIdle(result.job))
       .catch(() => false);
     if (!idle) return waiting('nod was busy or waiting for you for 15 minutes');
     const stamp = pacificStamp(new Date(now));
@@ -650,7 +656,7 @@ export function startSigninInbox(options) {
       return 'done';
     }
     const ready = await Promise.resolve()
-      .then(isIdle)
+      .then(() => isIdle(result.job))
       .catch(() => false);
     let posted;
     let failure = '';

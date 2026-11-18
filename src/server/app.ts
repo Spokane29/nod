@@ -59,7 +59,12 @@ import type {
   Turn,
 } from '../shared/contracts.ts';
 import type { createChatVerification } from './chat-verification.ts';
-import { ownerBusy, registerSigninRequests } from './signin-request.ts';
+import {
+  ownerBusy,
+  portalParallel,
+  portalRunning,
+  registerSigninRequests,
+} from './signin-request.ts';
 import { registerWorkAdmission, type WorkAdmission } from './work-admission.ts';
 import { registerAnalyticsRoutes, snapshotAnalytics, type CaptureAnalytics } from './analytics.ts';
 import { messagePreview } from './message-preview.ts';
@@ -330,12 +335,19 @@ export async function createApp(dependencies: AppDependencies = {}) {
          FROM turns u WHERE u.owner_id=$1 AND u.status='running'`,
         [ownerId],
       );
-      return { running: result.rows, busy: await ownerBusy(pool, ownerId) };
+      const parallel = portalParallel(process.env.NOD_PORTAL_PARALLEL);
+      return {
+        running: result.rows,
+        busy: await ownerBusy(pool, ownerId),
+        portalParallel: parallel,
+        portalSlots: parallel > 1 ? parallel - (await portalRunning(pool, ownerId)) : 0,
+      };
     });
     registerSigninRequests(app, {
       pool,
       ownerId,
       ready: () => publicConfiguration().llmReady,
+      parallel: portalParallel(process.env.NOD_PORTAL_PARALLEL),
       submit: (text, attachments, input) => submitUserMessage(text, attachments, input),
     });
   }

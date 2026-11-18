@@ -129,6 +129,7 @@ interface SubmitUserMessageOptions {
   answer?: ChatConfirmationInput['answer'];
   prepareAttachments?: (client: PoolClient, threadId: string) => Promise<Artifact[]>;
   afterLock?: (client: PoolClient) => Promise<void>;
+  sessionId?: string;
   persistSubmission?: (client: PoolClient, result: SubmitUserMessageResult) => Promise<void>;
   onInserted?: () => void;
   stopSignal?: AbortSignal;
@@ -646,13 +647,15 @@ export async function submitUserMessage(
       confirmation.hasAttachments)
   )
     throw httpError('Answer the approval with the button you chose.', 400);
-  const answer = options.questionAnswer
-    ? undefined
-    : options.approvalAnswer
-      ? options.approvalAnswer
-      : options.client
-        ? options.answer
-        : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
+  const detached = options.sessionId !== undefined;
+  const answer =
+    options.questionAnswer || detached
+      ? undefined
+      : options.approvalAnswer
+        ? options.approvalAnswer
+        : options.client
+          ? options.answer
+          : await readAnswer(text, confirmation.hasAttachments, options, confirmAction);
   let inserted = false;
   const markInserted = () => {
     inserted = true;
@@ -743,7 +746,7 @@ export async function submitUserMessage(
       throw httpError('Select a passage of 4,000 characters or fewer.');
     const live = !stop.aborted;
     const confirmed =
-      options.questionAnswer || !live
+      options.questionAnswer || !live || detached
         ? undefined
         : await confirmAction?.accept(
             client,
@@ -769,24 +772,26 @@ export async function submitUserMessage(
     const turnId = randomUUID();
     const taskTarget =
       live &&
+      !detached &&
       options.replyToMessageId &&
       (await taskReply?.(client, thread.id, options.replyToMessageId));
-    const question = live
-      ? taskTarget ||
-        choiceQuestion ||
-        confirmed?.waiting ||
-        (
-          await client.query(
-            `SELECT u.id,u.session_id,u.background FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id
+    const question =
+      live && !detached
+        ? taskTarget ||
+          choiceQuestion ||
+          confirmed?.waiting ||
+          (
+            await client.query(
+              `SELECT u.id,u.session_id,u.background FROM turns u JOIN messages m ON m.turn_id=u.id AND m.owner_id=u.owner_id
        WHERE u.owner_id=$1 AND u.thread_id=$2 AND (u.channel=$3 OR $4::uuid IS NOT NULL) AND u.status='waiting' AND u.waiting_reason='question'
          AND m.role='assistant' AND (($4::uuid IS NOT NULL AND m.id=$4) OR ($4::uuid IS NULL AND u.session_id=$2))
          AND m.id=(SELECT q.id FROM messages q WHERE q.turn_id=u.id AND q.owner_id=u.owner_id AND q.role='assistant' ORDER BY q.created_at DESC,q.id DESC LIMIT 1)
          AND NOT ${laterSupersedingTurnSql}
        ORDER BY m.created_at DESC,m.id DESC LIMIT 1`,
-            [ownerId, thread.id, channel, options.replyToMessageId ?? null],
-          )
-        ).rows[0]
-      : undefined;
+              [ownerId, thread.id, channel, options.replyToMessageId ?? null],
+            )
+          ).rows[0]
+        : undefined;
     await client.query(
       `INSERT INTO turns(id,owner_id,thread_id,source,source_id,message_id,prompt,channel,session_id,background,parent_turn_id,status,finished_at,withdrawn)
        VALUES($1,$2,$3,'user',$4,$5,$6,$7,$8,$9,$10,$11,CASE WHEN $11='cancelled' THEN now() END,$11='cancelled')`,
@@ -798,8 +803,8 @@ export async function submitUserMessage(
         messageId,
         options.prompt ?? text,
         channel,
-        question?.session_id ?? thread.id,
-        question?.background ?? false,
+        question?.session_id ?? options.sessionId ?? thread.id,
+        question?.background ?? detached,
         question?.id ?? null,
         live ? 'queued' : 'cancelled',
       ],

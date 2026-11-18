@@ -95,6 +95,29 @@ export async function ownerBusy(db: Pick<Pool, 'query'>, ownerId: string, except
   return rows[0]!.busy;
 }
 
+export const portalParallelLimit = 3;
+
+export function portalParallel(value: unknown) {
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 1 && count <= portalParallelLimit ? count : 1;
+}
+
+export async function portalRunning(
+  db: Pick<Pool, 'query'>,
+  ownerId: string,
+  exceptTurnId?: string,
+) {
+  const { rows } = await db.query<{ count: number }>(
+    `SELECT count(DISTINCT u.session_id)::int AS count FROM turns u
+       WHERE u.owner_id=$1 AND u.session_id<>u.thread_id AND u.status IN ('queued','running')
+         AND ($2::uuid IS NULL OR u.id<>$2::uuid)
+         AND EXISTS (SELECT 1 FROM turns r WHERE r.owner_id=u.owner_id AND r.session_id=u.session_id
+           AND starts_with(r.source_id,$3))`,
+    [ownerId, exceptTurnId ?? null, signinSourcePrefix],
+  );
+  return rows[0]!.count;
+}
+
 const busyError = () =>
   Object.assign(new Error('Nod is busy or waiting for you.'), { signinBusy: true });
 
@@ -104,6 +127,7 @@ export function registerSigninRequests(
     pool: Pool;
     ownerId: string;
     ready: () => boolean;
+    parallel?: number;
     submit: (
       text: string,
       attachments: [],
@@ -111,6 +135,7 @@ export function registerSigninRequests(
         channel: string;
         sourceId: string;
         clientMessageId: string;
+        sessionId?: string;
         afterLock: (client: PoolClient) => Promise<void>;
         persistSubmission: (client: PoolClient, result: SubmitUserMessageResult) => Promise<void>;
       },
@@ -118,6 +143,7 @@ export function registerSigninRequests(
   },
 ) {
   const { pool, ownerId } = options;
+  const parallel = portalParallel(options.parallel);
   app.post('/api/desktop/signin', async (request, reply) => {
     const { url, job, ref } = z
       .object({
@@ -147,17 +173,23 @@ export function registerSigninRequests(
       );
     const busy = () =>
       reply.code(409).send({ code: 'signin_busy', error: 'Nod is busy or waiting for you.' });
-    if (await ownerBusy(pool, ownerId)) return busy();
+    const own = parallel > 1 && job !== 'hold';
+    const full = (db: Pick<Pool, 'query'>, exceptTurnId?: string) =>
+      own
+        ? portalRunning(db, ownerId, exceptTurnId).then((count) => count >= parallel)
+        : ownerBusy(db, ownerId, exceptTurnId);
+    if (await full(pool)) return busy();
     try {
       return await options.submit(jobMessage(job, checked, refs), [], {
         channel: 'web',
         sourceId: `${signinSourcePrefix}${job}:${randomUUID()}`,
         clientMessageId: randomUUID(),
+        ...(own ? { sessionId: randomUUID() } : {}),
         afterLock: async (client) => {
-          if (await ownerBusy(client, ownerId)) throw busyError();
+          if (await full(client)) throw busyError();
         },
         persistSubmission: async (client, result) => {
-          if (await ownerBusy(client, ownerId, result.turnId)) throw busyError();
+          if (await full(client, result.turnId)) throw busyError();
         },
       });
     } catch (error) {
