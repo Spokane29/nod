@@ -92,6 +92,7 @@ test('only plain https start urls are accepted for the allow-list', () => {
     'https://oxygen.apttravelgroup.com/res/search',
     'https://www.disneytravelagents.com/',
     'https://my-portal.example.co.uk/login',
+    'https://www.viking.com/travel-advisor',
   ])
     assert.equal(signinUrl(good), good);
 });
