@@ -41,6 +41,12 @@ A private form stays available while its task waits for you. It stops accepting 
 
 If a newer chat message closes your form, the old link expires. Ask Nod for a new sign-in form if you still need it.
 
+## Add an API credential
+
+In **Vault**, select **Add → API credential**. Enter the API's HTTPS address, a path for a read-only GET request and the bearer token or API key header. Use a read path that requires authentication so it can confirm the credential works.
+
+After the check succeeds, Nod saves the credential encrypted and shows the connection under **Apps**. The token stays out of chat and is sent only to the saved API. Agent requests still go through the app trust check. For other authentication methods, see [MCP servers, APIs and CLIs](/connect/mcp-api-cli/).
+
 ## Use a login from 1Password
 
 In the private **Sign in** form, select **Use 1Password**. The first time, enter your 1Password account name as it appears at the top of the 1Password sidebar. Approve the request in 1Password, then choose the login. Nod saves a copy in Vault, with its authenticator key, and signs in.

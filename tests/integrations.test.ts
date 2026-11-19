@@ -14132,3 +14132,99 @@ test(
     assert.equal((await f.service.activitySources()).length, 0);
   },
 );
+
+test(
+  'Vault API credentials become verified encrypted app connections',
+  {
+    skip: !process.env.TEST_DATABASE_URL,
+  },
+  async (t) => {
+    const schema = `test_vault_api_${randomUUID().replaceAll('-', '')}`;
+    const admin = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL });
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    const pool = new pg.Pool({
+      connectionString: process.env.TEST_DATABASE_URL,
+      options: `-c search_path=${schema}`,
+    });
+    const app = Fastify();
+    t.after(async () => {
+      await app.close();
+      await pool.end();
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+      await admin.end();
+    });
+    const ownerId = 'fixture-owner';
+    const key = randomBytes(32);
+    const grantVault = await createAppGrantVault(pool, {
+      ownerId,
+      keyStore: { id: 'fixture', configured: true, getKey: async () => key },
+    });
+    const token = 'synthetic/vault-fixture-key';
+    const requests: unknown[] = [];
+    const discovered = await createDiscoveredConnections(pool, {
+      ownerId,
+      baseUrl: 'http://localhost:4310',
+      grantVault,
+      transport: {
+        validateEndpoint: async (endpoint) => endpoint,
+        listTools: async () => assert.fail('Expected an HTTP connection'),
+        callTool: async () => assert.fail('Expected an HTTP connection'),
+        http: async (url, headers, method) => {
+          requests.push({ url, headers, method });
+          const supplied = headers['X-Fixture-Key'];
+          return {
+            status: supplied === token ? 200 : 401,
+            body: { message: `Echoed ${supplied}` },
+          };
+        },
+      },
+      oauth: {} as Parameters<typeof createDiscoveredConnections>[1]['oauth'],
+    });
+    discovered.registerRoutes(app);
+    const payload = {
+      name: 'Fixture API',
+      endpoint: 'https://fixture.example/api',
+      testPath: '/account',
+      auth: 'x-api-key',
+      apiKeyHeader: 'X-Fixture-Key',
+      token,
+    };
+    const add = (fields = {}) =>
+      app.inject({
+        url: '/api/vault/api-credentials',
+        method: 'POST',
+        payload: { ...payload, ...fields },
+      });
+    const outside = await add({ testPath: 'https://other.example/account' });
+    assert.ok(outside.statusCode >= 400);
+    assert.equal(requests.length, 0);
+
+    const rejected = await add({ token: 'rejected-fixture-key' });
+    assert.equal(rejected.statusCode, 409);
+    assert.match(rejected.body, /401/);
+    assert.doesNotMatch(rejected.body, /rejected-fixture-key|Echoed/);
+    assert.deepEqual(await discovered.list(), []);
+
+    const results = await Promise.all([add(), add()]);
+    assert.deepEqual(results.map((result) => result.statusCode).sort(), [201, 409]);
+    assert.deepEqual(requests[1], {
+      url: 'https://fixture.example/api/account',
+      headers: { 'X-Fixture-Key': token },
+      method: 'GET',
+    });
+    const connections = await discovered.list();
+    assert.equal(connections.length, 1);
+    assert.doesNotMatch(JSON.stringify(connections), /vault-fixture-key/);
+    const [connection] = connections;
+    assert.equal((await grantVault.read(connection.connectionId!))?.value, token);
+    const [path] = (await discovered.search('Fixture API', connection.connectionId)).accounts[0]
+      .paths;
+    const executed = await discovered.execute('CONNECTED_HTTP', {
+      connectionId: connection.connectionId,
+      pathId: path.id,
+      method: 'GET',
+      path: 'account',
+    });
+    assert.deepEqual(executed, { body: { message: 'Echoed [redacted]' }, status: 200 });
+  },
+);

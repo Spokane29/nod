@@ -678,9 +678,24 @@ export async function createDiscoveredConnections(
     if (!row) throw error('This connection request expired.', 404);
     return row;
   }
-  async function save(pending: ProposalRow, accountName: string, secret: string) {
+  async function save(
+    pending: ProposalRow,
+    accountName: string,
+    secret: string,
+    uniqueAccount = false,
+  ) {
     const idToSave = pending.connection_id ?? randomUUID();
     await transaction(async (client) => {
+      if (uniqueAccount) {
+        const identity = JSON.stringify([owner, pending.service, accountName]);
+        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [identity]);
+        const existing = await client.query(
+          'SELECT 1 FROM discovered_connections WHERE owner_id=$1 AND service=$2 AND account_name=$3 LIMIT 1',
+          [owner, pending.service, accountName],
+        );
+        if (existing.rowCount)
+          throw error('This API connection is already saved. Use Apps to reconnect it.', 409);
+      }
       const used = pending.oauth_state_hash
         ? await client.query(
             `UPDATE discovered_connection_proposals SET oauth_status='connected',oauth_state_hash=NULL
@@ -761,7 +776,7 @@ export async function createDiscoveredConnections(
         { status: response.status },
       );
   }
-  async function complete(id: string, input: unknown) {
+  async function complete(id: string, input: unknown, source: 'discovery' | 'vault' = 'discovery') {
     const { token: entered, accountName } = z
       .object({
         token: z.union([
@@ -835,11 +850,15 @@ export async function createDiscoveredConnections(
         });
         const values = typeof entered === 'string' ? [entered] : Object.values(entered);
         const reason =
-          cause instanceof Error && cause.message
-            ? cause.message
-            : status
+          source === 'vault'
+            ? status
               ? `The service answered ${status}.`
-              : 'The service did not confirm access.';
+              : 'The service did not confirm access.'
+            : cause instanceof Error && cause.message
+              ? cause.message
+              : status
+                ? `The service answered ${status}.`
+                : 'The service did not confirm access.';
         const safe = [token, ...values].reduce(
           (value, secret) => String(redact(value, secret)),
           reason,
@@ -848,7 +867,7 @@ export async function createDiscoveredConnections(
       }
     }
     try {
-      return await save(pending, accountName, token);
+      return await save(pending, accountName, token, source === 'vault');
     } catch (error) {
       track(pending, 'failed', 'unknown', { step: 'save', error });
       throw error;
@@ -1581,6 +1600,52 @@ export async function createDiscoveredConnections(
     return rows.rows.flatMap((row) => row.paths.map(connection));
   }
   function registerRoutes(app: FastifyInstance) {
+    app.post('/api/vault/api-credentials', { bodyLimit: 32_768 }, async (request, reply) => {
+      const { name, endpoint, auth, apiKeyHeader, testPath, token } = z
+        .object({
+          name: proposalSchema.shape.name,
+          endpoint: z.url({ protocol: /^https$/ }).max(2048),
+          auth: z.enum(['bearer', 'x-api-key']),
+          apiKeyHeader: z.string().trim().max(100).optional(),
+          testPath: z.string().trim().min(1).max(2048),
+          token: z
+            .string()
+            .min(1)
+            .max(8192)
+            .regex(/^[!-~]+$/),
+        })
+        .strict()
+        .parse(request.body);
+      const address = new URL(endpoint);
+      if (address.username || address.password || address.search || address.hash)
+        throw error('Use an HTTPS API address without credentials, a query or a fragment.');
+      if (testPath.includes('?')) throw error('Use a read check path without a query.');
+      if (
+        [name, endpoint, testPath, apiKeyHeader ?? ''].some((value) =>
+          credentialVariants(token).some((variant) => value.includes(variant)),
+        )
+      )
+        throw error('Enter the API credential only in the token field.');
+      const path = appAccessSchema.parse({
+        kind: 'http',
+        endpoint,
+        auth,
+        testPath,
+        ...(apiKeyHeader ? { apiKeyHeader } : {}),
+      });
+      const service = `api-${createHash('sha256').update(address.href.replace(/\/$/, '')).digest('hex').slice(0, 24)}`;
+      const proposal = await create({ service, name, paths: [path] }, undefined, 'apps');
+      try {
+        const result = await complete(proposal.id, { token, accountName: name }, 'vault');
+        return reply.header('Cache-Control', 'no-store').code(201).send(result);
+      } catch (cause) {
+        await pool.query(
+          'DELETE FROM discovered_connection_proposals WHERE id=$1 AND owner_id=$2',
+          [proposal.id, owner],
+        );
+        throw cause;
+      }
+    });
     app.post('/api/apps/mcp', async (request, reply) => {
       const parsed = z
         .object({

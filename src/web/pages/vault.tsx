@@ -10,6 +10,7 @@ import { VaultSessionDetails, VaultSiteAccess } from '../components/vault-site';
 import { VaultEntryIcon, VaultSurface } from '../components/vault-surface';
 import { formatCardExpiry, VaultItemForm } from '../components/vault-item-form';
 import { VaultCardPayments } from '../components/vault-card';
+import { VaultApiCredentialDialog } from '../components/vault-api-credential-dialog';
 import { VaultImportDialog } from '../components/vault-import-dialog';
 import { originLabel } from '../lib/vault-name';
 import { cn } from '../lib/utils';
@@ -62,6 +63,7 @@ export function Vault({ hidden = false, onAsk }: { hidden?: boolean; onAsk?(text
   const [query, setQuery] = useState('');
   const [menu, setMenu] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [addingApi, setAddingApi] = useState(false);
   const [adding, setAdding] = useState<'login' | 'card' | null>(request.add);
   const [selectedId, setSelectedId] = useState<string | null | undefined>(request.item);
   const [fromUsage, setFromUsage] = useState(request.item);
@@ -92,10 +94,10 @@ export function Vault({ hidden = false, onAsk }: { hidden?: boolean; onAsk?(text
   const backToUsage = Boolean(fromUsage) && selected?.id === fromUsage;
 
   useEffect(() => {
-    if (importing || !returnFromImportMenu.current) return;
+    if (importing || addingApi || !returnFromImportMenu.current) return;
     returnFromImportMenu.current = false;
     newTrigger.current?.focus({ preventScroll: true });
-  }, [importing]);
+  }, [importing, addingApi]);
 
   useEffect(() => {
     if (hidden || !window.location.search) return;
@@ -318,6 +320,17 @@ export function Vault({ hidden = false, onAsk }: { hidden?: boolean; onAsk?(text
                   openingDialog.current = true;
                   returnFromImportMenu.current = true;
                   setMenu(false);
+                  setAddingApi(true);
+                }}
+              >
+                <KeyRound size={16} aria-hidden="true" />
+                API credential
+              </ActionMenuItem>
+              <ActionMenuItem
+                onClick={() => {
+                  openingDialog.current = true;
+                  returnFromImportMenu.current = true;
+                  setMenu(false);
                   setImporting(true);
                 }}
               >
@@ -400,6 +413,7 @@ export function Vault({ hidden = false, onAsk }: { hidden?: boolean; onAsk?(text
         )}
         {detail && <div className="vault-detail-column">{detail}</div>}
       </div>
+      {addingApi && <VaultApiCredentialDialog onClose={() => setAddingApi(false)} />}
       <VaultImportDialog
         open={importing}
         onOpenChange={setImporting}
