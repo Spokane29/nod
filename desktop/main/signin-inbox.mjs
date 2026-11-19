@@ -576,6 +576,14 @@ export function outcomeConfirmed(outcome, key = '', ref = '') {
     !(outcome.signin === 'submitted' || outcome.signin === 'none')
   )
     return false;
+  const lines = String(outcome.reply ?? '')
+    .split('\n')
+    .map((line) => line.trim());
+  if (key && !key.includes('.'))
+    return (
+      lines.includes('SIGNED-IN') ||
+      (outcome.signin === 'submitted' && !lines.some((line) => line.startsWith('NOT-SIGNED-IN')))
+    );
   if (key.endsWith('.autohold')) return Boolean(heldBooking(outcome.reply));
   if (key.endsWith('.release'))
     return String(outcome.reply ?? '')

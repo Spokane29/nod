@@ -569,6 +569,24 @@ test('two unconfirmed sign-ins pause a site until it is reset', async (t) => {
   assert.equal(outcomeConfirmed({ turn: 'succeeded', signin: 'uncertain' }), false);
   assert.equal(outcomeConfirmed({ turn: 'failed', signin: 'submitted' }), false);
   assert.equal(outcomeConfirmed(undefined), false);
+  assert.equal(
+    outcomeConfirmed(
+      { turn: 'succeeded', signin: 'none', reply: 'Still loading.\nNOT-SIGNED-IN spinner' },
+      'viking',
+    ),
+    false,
+  );
+  assert.equal(
+    outcomeConfirmed({ turn: 'succeeded', signin: 'none', reply: 'It loaded.' }, 'viking'),
+    false,
+  );
+  assert.equal(
+    outcomeConfirmed(
+      { turn: 'succeeded', signin: 'submitted', reply: 'Welcome, Bill.\nSIGNED-IN' },
+      'viking',
+    ),
+    true,
+  );
 });
 
 async function fixture(options = {}) {
@@ -877,7 +895,7 @@ test('a confirmed sign-in clears the count', async (t) => {
   t.after(f.stop);
   for (const [round, outcome] of [
     [1, { turn: 'failed', signin: 'none' }],
-    [2, { turn: 'succeeded', signin: 'submitted' }],
+    [2, { turn: 'succeeded', signin: 'none', reply: 'Welcome back.\nSIGNED-IN' }],
     [3, { turn: 'failed', signin: 'none' }],
   ]) {
     await f.drop(`r${round}.json`, JSON.stringify({ site: 'ncl' }));
