@@ -7,7 +7,7 @@ import { waitingTurnSql } from './turn-chain.ts';
 import type { SubmitUserMessageResult } from './thread.ts';
 
 export const signinSourcePrefix = 'inbox:';
-const segment = /^[a-z0-9]{1,24}$/;
+const segment = /^[a-z0-9]{1,24}$|^[a-z0-9]{1,15}-[a-z0-9]{1,15}$/;
 const label = /^[a-z0-9]{1,30}$|^[a-z0-9]{1,15}-[a-z0-9]{1,15}$/;
 const suffix = /^[a-z]{2,24}$/;
 const localSuffix = new Set(['localhost', 'local', 'internal', 'lan', 'home', 'arpa', 'test']);

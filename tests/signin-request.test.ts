@@ -18,6 +18,11 @@ import {
 test('only plain https start urls are accepted', () => {
   assert.equal(signinUrl('https://secure.cruisingpower.com/'), 'https://secure.cruisingpower.com/');
   assert.equal(signinUrl('https://www.ncl.com/agents/login'), 'https://www.ncl.com/agents/login');
+  assert.equal(
+    signinUrl('https://www.viking.com/travel-advisor'),
+    'https://www.viking.com/travel-advisor',
+  );
+  assert.equal(signinUrl('https://www.viking.com/log-in-now'), undefined);
   for (const bad of [
     'http://secure.cruisingpower.com/',
     'https://user:pw@secure.cruisingpower.com/',
