@@ -111,13 +111,30 @@ function headers(
   return appRequestHeaders(path, token);
 }
 
+function authorizationParts(token: string): string[] {
+  const basic = /^Basic ([A-Za-z0-9+/]+={0,2})$/.exec(token);
+  const sso = /^sso-key ([!-9;-~]+):([!-9;-~]+)$/.exec(token);
+  if (sso) return sso.slice(1);
+  if (!basic) return [];
+  const decoded = Buffer.from(basic[1], 'base64').toString('utf8');
+  const separator = decoded.indexOf(':');
+  if (separator < 1 || separator === decoded.length - 1) return [];
+  return [basic[1], decoded, decoded.slice(separator + 1)];
+}
+
 function credentialVariants(token: string) {
-  const variants = new Set([token, JSON.stringify(token).slice(1, -1)]);
-  try {
-    variants.add(encodeURIComponent(token));
-    variants.add(encodeURI(token));
-    variants.add(new URLSearchParams({ value: token }).toString().slice(6));
-  } catch {}
+  const values = [token, ...authorizationParts(token).filter((value) => value.length >= 8)];
+  const variants = new Set<string>();
+  for (const value of values) {
+    variants.add(value);
+    variants.add(JSON.stringify(value).slice(1, -1));
+    try {
+      variants.add(encodeURIComponent(value));
+      variants.add(encodeURI(value));
+      variants.add(new URLSearchParams({ value }).toString().slice(6));
+    } catch {}
+  }
+
   for (const value of [...variants])
     variants.add(value.replace(/%[0-9A-F]{2}/g, (code) => code.toLowerCase()));
   return [...variants].sort((a, b) => b.length - a.length);
@@ -1608,14 +1625,19 @@ export async function createDiscoveredConnections(
           auth: z.enum(['bearer', 'x-api-key']),
           apiKeyHeader: z.string().trim().max(100).optional(),
           testPath: z.string().trim().min(1).max(2048),
-          token: z
-            .string()
-            .min(1)
-            .max(8192)
-            .regex(/^[!-~]+$/),
+          token: z.string().min(1).max(8192),
         })
         .strict()
         .parse(request.body);
+      if (
+        !/^[!-~]+$/.test(token) &&
+        !(
+          auth === 'x-api-key' &&
+          apiKeyHeader?.toLowerCase() === 'authorization' &&
+          authorizationParts(token).length
+        )
+      )
+        throw error('Use a single token or a Basic or sso-key Authorization header value.');
       const address = new URL(endpoint);
       if (address.username || address.password || address.search || address.hash)
         throw error('Use an HTTPS API address without credentials, a query or a fragment.');

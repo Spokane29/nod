@@ -43,7 +43,7 @@ If a newer chat message closes your form, the old link expires. Ask Nod for a ne
 
 ## Add an API credential
 
-In **Vault**, select **Add → API credential**. Enter the API's HTTPS address, a path for a read-only GET request and the bearer token or API key header. Use a read path that requires authentication so it can confirm the credential works.
+In **Vault**, select **Add → API credential**. Enter the API's HTTPS address, a path for a read-only GET request and the bearer token or API key header. Use a read path that requires authentication so it can confirm the credential works. For a Basic or GoDaddy sso-key credential, select **API key header**, enter `Authorization` as the header name and paste the complete header value.
 
 After the check succeeds, Nod saves the credential encrypted and shows the connection under **Apps**. The token stays out of chat and is sent only to the saved API. Agent requests still go through the app trust check. For other authentication methods, see [MCP servers, APIs and CLIs](/connect/mcp-api-cli/).
 

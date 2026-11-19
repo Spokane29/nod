@@ -14160,6 +14160,8 @@ test(
       keyStore: { id: 'fixture', configured: true, getKey: async () => key },
     });
     const token = 'synthetic/vault-fixture-key';
+    const basicSecret = 'synthetic-basic-password';
+    const basicHeader = `Basic ${Buffer.from(`fixture:${basicSecret}`).toString('base64')}`;
     const requests: unknown[] = [];
     const discovered = await createDiscoveredConnections(pool, {
       ownerId,
@@ -14171,6 +14173,8 @@ test(
         callTool: async () => assert.fail('Expected an HTTP connection'),
         http: async (url, headers, method) => {
           requests.push({ url, headers, method });
+          if (headers.Authorization === basicHeader)
+            return { status: 200, body: { message: basicSecret } };
           const supplied = headers['X-Fixture-Key'];
           return {
             status: supplied === token ? 200 : 401,
@@ -14226,5 +14230,23 @@ test(
       path: 'account',
     });
     assert.deepEqual(executed, { body: { message: 'Echoed [redacted]' }, status: 200 });
+    const addedBasic = await add({
+      name: 'Basic API',
+      apiKeyHeader: 'Authorization',
+      token: basicHeader,
+    });
+    assert.equal(addedBasic.statusCode, 201, addedBasic.body);
+    const basic = (await discovered.list()).find((app) => app.name === 'Basic API')!;
+    const [basicPath] = (await discovered.search('Basic API', basic.connectionId)).accounts[0]
+      .paths;
+    assert.deepEqual(
+      await discovered.execute('CONNECTED_HTTP', {
+        connectionId: basic.connectionId,
+        pathId: basicPath.id,
+        method: 'GET',
+        path: 'account',
+      }),
+      { status: 200, body: { message: '[redacted]' } },
+    );
   },
 );
