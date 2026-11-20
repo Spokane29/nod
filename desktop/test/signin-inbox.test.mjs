@@ -839,6 +839,26 @@ test('a refused post is filed as rejected and counts toward the limits', async (
   assert.equal(JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8')).accepted.length, 1);
 });
 
+test('a sign-in that typed no login never pauses a site', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  for (const round of [1, 2, 3]) {
+    await f.drop(`r${round}.json`, JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    f.setOutcome(`u${round}`, {
+      turn: 'succeeded',
+      signin: 'none',
+      reply: 'NOT-SIGNED-IN the page stayed blank',
+    });
+    await f.scan();
+    f.advance(11 * 60_000);
+  }
+  assert.equal(f.calls.length, 3);
+  const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.blocked.ncl, undefined);
+  assert.equal(state.strikes.ncl, undefined);
+});
+
 test('a paused site resumes only from the data folder, never from the inbox', async (t) => {
   const f = await fixture();
   t.after(f.stop);

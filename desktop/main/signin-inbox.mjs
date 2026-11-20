@@ -547,13 +547,14 @@ export function createGate(options) {
       if (booking) state.placed[booking] = site;
       else delete state.placed[site];
     },
-    settle(site, confirmed) {
+    settle(site, confirmed, typed = true) {
       delete state.pending[site];
       if (site.includes('.')) return;
       if (confirmed) {
         delete state.strikes[site];
         return;
       }
+      if (!typed) return;
       state.strikes[site] = (state.strikes[site] ?? 0) + 1;
       if (state.strikes[site] >= unconfirmedLimit) state.blocked[site] = true;
     },
@@ -932,7 +933,7 @@ export function startSigninInbox(options) {
       if (confirmed && key.endsWith('.autohold'))
         gate.placed(key.split('.')[0], heldBooking(outcome.reply));
       if (confirmed && key.endsWith('.release')) gate.placed(ref);
-      gate.settle(key, confirmed);
+      gate.settle(key, confirmed, !(outcome?.turn === 'succeeded' && outcome.signin === 'none'));
       await gate.save().catch(() => {});
       await saveReply(key, turnId, outcome, confirmed);
       await log(
