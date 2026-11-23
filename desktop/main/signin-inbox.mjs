@@ -33,6 +33,7 @@ export const signinCauses = [
 ];
 const retryCauses = new Set(['form_blank', 'browser_error']);
 const noStrikeCauses = new Set(['form_blank', 'browser_error']);
+const filledCauses = new Set(['vault_missing', 'not_finished']);
 const allowBytes = 65_536;
 const stateBytes = 65_536;
 const logBytes = 1_000_000;
@@ -1557,7 +1558,7 @@ export function startSigninInbox(options) {
       if (
         !key.includes('.') &&
         !verdict.confirmed &&
-        verdict.cause === 'vault_missing' &&
+        filledCauses.has(verdict.cause) &&
         pressFilled &&
         sites.has(key) &&
         (await checksFor(key)).browserFilled

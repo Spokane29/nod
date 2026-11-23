@@ -1711,3 +1711,27 @@ test('without the switch, or when the form is not filled, nothing is pressed', a
   assert.equal(last.verdict, 'unconfirmed');
   assert.match(last.reason, /browser form: the form is not filled/);
 });
+
+test('a turn left waiting for secure input, or one that never answered, still gets the one browser-filled press', async (t) => {
+  for (const outcome of [{ turn: 'waiting', signin: 'none', reply: '' }, undefined]) {
+    const f = await fixture();
+    t.after(f.stop);
+    await writeFile(
+      join(f.dataDir, checksFile),
+      JSON.stringify({ sites: { ncl: { browserFilled: true } } }),
+    );
+    await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    if (outcome) f.setOutcome('u1', outcome);
+    else f.advance(31 * 60_000);
+    await f.scan();
+    assert.equal(f.presses.length, 1, JSON.stringify(outcome));
+    assert.equal(f.presses[0].prefer, undefined);
+    f.advance(21_000);
+    await f.scan();
+    assert.equal(f.presses.length, 1);
+    assert.equal(f.calls.length, 1);
+    const last = JSON.parse((await f.read('replies/ncl.log.jsonl')).trim().split('\n').at(-1));
+    assert.deepEqual([last.verdict, last.signin], ['confirmed', 'browser_filled']);
+  }
+});
