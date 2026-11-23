@@ -52,7 +52,12 @@ import { startWindowsInstall } from './windows-update.mjs';
 import { appOpenPath } from './app-links.mjs';
 import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
-import { prepareSigninInbox, startSigninInbox, writeSigninStatus } from './signin-inbox.mjs';
+import {
+  cdpPageCheck,
+  prepareSigninInbox,
+  startSigninInbox,
+  writeSigninStatus,
+} from './signin-inbox.mjs';
 
 trustSystemCertificates();
 
@@ -606,6 +611,7 @@ async function startSigninInboxFromSettings() {
     request: (path, options) => engineRequest(path, options),
     isIdle: engineIdle,
     outcome: signinOutcome,
+    pageCheck: cdpPageCheck(dataDir),
     holdKey: async () => (await readFile(join(dataDir, 'autohold-key'), 'utf8')).trim(),
   }).stop;
 }

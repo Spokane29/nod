@@ -7,6 +7,7 @@ import {
   invoiceFolder,
   jobMessage,
   jobRef,
+  loginOrigins,
   ownerBusy,
   portalRunning,
   registerSigninRequests,
@@ -14,6 +15,8 @@ import {
   signinSourcePrefix,
   signinUrl,
 } from '../src/server/signin-request.ts';
+import { linkLoginOrigins, sitePattern } from '../src/server/vault.ts';
+import { savedLoginMatches } from '../src/server/integrations.ts';
 
 test('only plain https start urls are accepted', () => {
   assert.equal(signinUrl('https://secure.cruisingpower.com/'), 'https://secure.cruisingpower.com/');
@@ -636,3 +639,98 @@ test(
     assert.equal((await ledger.checkIn(session, owner))?.spentUsd, 0.25);
   },
 );
+
+test('a second try says so, and only clean https login origins are accepted', () => {
+  const url = 'https://www.viking.com/travel-advisor';
+  assert.ok(signinMessage(url, true).startsWith('This is the second try:'));
+  assert.ok(signinMessage(url, true).endsWith(signinMessage(url)));
+  assert.equal(jobMessage('signin', url, '', undefined, undefined, true), signinMessage(url, true));
+  assert.deepEqual(loginOrigins(undefined), []);
+  assert.deepEqual(loginOrigins(['https://login.viking.com', 'https://login.viking.com']), [
+    'https://login.viking.com',
+  ]);
+  for (const bad of [
+    ['https://login.viking.com/'],
+    ['http://login.viking.com'],
+    ['https://login.viking.com:8443'],
+    ['https://user@login.viking.com'],
+    ['https://localhost'],
+    'https://login.viking.com',
+    ['https://a.x.com', 'https://b.x.com', 'https://c.x.com', 'https://d.x.com', 'https://e.x.com'],
+  ])
+    assert.equal(loginOrigins(bad), undefined, JSON.stringify(bad));
+});
+
+test('a linked login origin matches its site in the Vault and loosens nothing else', () => {
+  const matches = (page: string, saved: string) => new RegExp(sitePattern(page)).test(saved);
+  assert.equal(
+    matches('https://www.pleasantadvisor.com', 'https://identity.pleasantadvisor.com'),
+    true,
+  );
+  assert.equal(
+    matches('https://www.pleasantadvisor.com', 'https://www.pleasantholidays.com'),
+    false,
+  );
+  linkLoginOrigins('https://www.pleasantadvisor.com/', ['https://agents.pleasantholidays.com']);
+  try {
+    assert.equal(
+      matches('https://agents.pleasantholidays.com', 'https://www.pleasantadvisor.com'),
+      true,
+    );
+    assert.equal(
+      matches('https://www.pleasantadvisor.com', 'https://agents.pleasantholidays.com'),
+      true,
+    );
+    assert.equal(
+      matches('https://identity.pleasantadvisor.com', 'https://agents.pleasantholidays.com'),
+      true,
+    );
+    assert.equal(
+      matches('https://www.pleasantadvisor.com', 'https://evil.pleasantholidays.com'),
+      false,
+    );
+    assert.equal(
+      matches('https://shop.pleasantholidays.com', 'https://www.pleasantadvisor.com'),
+      false,
+    );
+    assert.equal(matches('https://www.viking.com', 'https://agents.pleasantholidays.com'), false);
+    assert.equal(
+      matches('https://www.pleasantadvisor.com', 'https://agents.pleasantholidays.com.evil.com'),
+      false,
+    );
+  } finally {
+    linkLoginOrigins('https://www.pleasantadvisor.com/', []);
+  }
+  assert.equal(
+    matches('https://agents.pleasantholidays.com', 'https://www.pleasantadvisor.com'),
+    false,
+  );
+});
+
+test('a saved login is listed for any host of its registered domain, never another site', () => {
+  assert.equal(
+    savedLoginMatches('identity.pleasantadvisor.com', 'https://www.pleasantadvisor.com'),
+    true,
+  );
+  assert.equal(savedLoginMatches('login.viking.com', 'https://www.viking.com'), true);
+  assert.equal(savedLoginMatches('pleasantadvisor.com', 'https://pleasantadvisor.com'), true);
+  assert.equal(savedLoginMatches('identity.pleasantadvisor.com', 'https://www.viking.com'), false);
+  assert.equal(
+    savedLoginMatches('identity.pleasantadvisor.com', 'https://pleasantadvisor.com.evil.com'),
+    false,
+  );
+  assert.equal(
+    savedLoginMatches('identity.pleasantadvisor.com', 'http://www.pleasantadvisor.com'),
+    false,
+  );
+  assert.equal(savedLoginMatches('bad host', 'https://www.pleasantadvisor.com'), false);
+  linkLoginOrigins('https://www.pleasantadvisor.com/', ['https://agents.pleasantholidays.com']);
+  try {
+    assert.equal(
+      savedLoginMatches('agents.pleasantholidays.com', 'https://www.pleasantadvisor.com'),
+      true,
+    );
+  } finally {
+    linkLoginOrigins('https://www.pleasantadvisor.com/', []);
+  }
+});

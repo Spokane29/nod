@@ -391,11 +391,40 @@ export function credentialOrigin(value: string) {
   return url.origin;
 }
 
+const linkedLogins = new Map<string, string[]>();
+
+export function linkLoginOrigins(siteUrl: string, origins: string[]) {
+  const domain = getDomain(new URL(siteUrl).hostname, { allowPrivateDomains: true });
+  if (!domain) return;
+  const hosts = [
+    ...new Set(
+      origins
+        .map((origin) => new URL(origin))
+        .filter((url) => url.protocol === 'https:' && !url.port && url.pathname === '/')
+        .map((url) => url.hostname),
+    ),
+  ];
+  if (hosts.length) linkedLogins.set(domain, hosts);
+  else linkedLogins.delete(domain);
+}
+
 export function sitePattern(origin: string) {
   const exact = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const url = new URL(origin);
   const domain =
     url.protocol === 'https:' ? getDomain(url.hostname, { allowPrivateDomains: true }) : null;
+  const linked = domain
+    ? linkedLogins.has(domain)
+      ? domain
+      : url.port
+        ? undefined
+        : [...linkedLogins].find(([, hosts]) => hosts.includes(url.hostname))?.[0]
+    : undefined;
+  if (linked)
+    return `^https://(([a-z0-9-]+\\.)*${exact(linked)}|${linkedLogins
+      .get(linked)!
+      .map(exact)
+      .join('|')})${url.port ? `:${url.port}` : ''}$`;
   if (domain) return `^https://([a-z0-9-]+\\.)*${exact(domain)}${url.port ? `:${url.port}` : ''}$`;
   if (!/[^.]\.[^.]/.test(url.hostname) || /^[\d.]+$|:/.test(url.hostname))
     return `^${exact(origin)}$`;

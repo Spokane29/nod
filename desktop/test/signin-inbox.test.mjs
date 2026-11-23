@@ -42,6 +42,14 @@ import {
   autoholdDailyLimit,
   heldBooking,
   holdSignature,
+  checksFile,
+  healthFile,
+  pageVerdict,
+  parseSigninChecks,
+  pickTarget,
+  replyCause,
+  signinHealth,
+  signinVerdict,
 } from '../main/signin-inbox.mjs';
 
 const allowText = JSON.stringify({
@@ -566,6 +574,28 @@ test('two unconfirmed sign-ins pause a site until it is reset', async (t) => {
   assert.equal(gate.check('a', 5_000_000_000_000).state, 'ok');
   assert.equal(outcomeConfirmed({ turn: 'succeeded', signin: 'submitted' }), true);
   assert.equal(outcomeConfirmed({ turn: 'succeeded', signin: 'none' }), true);
+  assert.equal(outcomeConfirmed({ turn: 'succeeded', signin: 'submitted' }, 'viking'), false);
+  assert.equal(
+    outcomeConfirmed(
+      { turn: 'succeeded', signin: 'submitted', reply: 'The page says you are not signed in.' },
+      'pleasant',
+    ),
+    false,
+  );
+  assert.equal(
+    outcomeConfirmed(
+      { turn: 'succeeded', signin: 'submitted', reply: 'Signed in, I think.\nSIGNED-IN?' },
+      'pleasant',
+    ),
+    false,
+  );
+  assert.equal(
+    outcomeConfirmed(
+      { turn: 'succeeded', signin: 'submitted', reply: 'SIGNED-IN\nNOT-SIGNED-IN not signed in' },
+      'pleasant',
+    ),
+    false,
+  );
   assert.equal(outcomeConfirmed({ turn: 'succeeded', signin: 'uncertain' }), false);
   assert.equal(outcomeConfirmed({ turn: 'failed', signin: 'submitted' }), false);
   assert.equal(outcomeConfirmed(undefined), false);
@@ -601,10 +631,18 @@ async function fixture(options = {}) {
   let clock = Date.now();
   let status = 200;
   let outcomes = {};
+  let look = { host: 'www.example.com', passwords: 0, signOut: true, markers: 0, textLength: 500 };
+  const looks = [];
   const handle = startSigninInbox({
     inbox,
     dataDir,
     sites,
+    origins: options.origins,
+    limits: { retryMs: 60_000 },
+    pageCheck: async (request) => {
+      looks.push(request);
+      return typeof look === 'function' ? look(request) : look;
+    },
     isIdle: async () => {
       idleChecks++;
       return typeof idle === 'function' ? idle(idleChecks) : idle;
@@ -634,6 +672,8 @@ async function fixture(options = {}) {
     setIdle: (value) => (idle = value),
     setStatus: (value) => (status = value),
     setOutcome: (turnId, value) => (outcomes[turnId] = value),
+    setLook: (value) => (look = value),
+    looks,
     checks: () => idleChecks,
     advance: (ms) => (clock += ms),
     drop: (name, content) => writeFile(join(inbox, name), content),
@@ -685,6 +725,7 @@ test('an accepted request posts only the allow-listed url and is filed once', as
   assert.deepEqual((await f.list()).sort(), [
     'accepted',
     'accepted-log.txt',
+    'health.json',
     'log.txt',
     'rejected',
     'status.json',
@@ -732,7 +773,7 @@ test('odd entries are moved out of the way and never read or posted', async (t) 
     ['file has more than one link\n', 'file is quarantined\n', 'file too large\n'].sort(),
   );
   assert.equal((await f.read('log.txt')).match(/rejected not a regular file/g).length, 2);
-  assert.deepEqual((await f.list()).sort(), ['log.txt', 'rejected', 'status.json']);
+  assert.deepEqual((await f.list()).sort(), ['health.json', 'log.txt', 'rejected', 'status.json']);
   assert.deepEqual((await f.inboxList()).sort(), ['dir.json', 'notes.txt']);
   assert.ok((await f.list('rejected')).every((name) => !name.startsWith('dir')));
   await f.scan();
@@ -842,21 +883,30 @@ test('a refused post is filed as rejected and counts toward the limits', async (
 test('a sign-in that typed no login never pauses a site', async (t) => {
   const f = await fixture();
   t.after(f.stop);
+  let turn = 0;
   for (const round of [1, 2, 3]) {
     await f.drop(`r${round}.json`, JSON.stringify({ site: 'ncl' }));
     await f.scan();
-    f.setOutcome(`u${round}`, {
-      turn: 'succeeded',
-      signin: 'none',
-      reply: 'NOT-SIGNED-IN the page stayed blank',
-    });
-    await f.scan();
+    for (const attempt of [1, 2]) {
+      turn++;
+      f.setOutcome(`u${turn}`, {
+        turn: 'succeeded',
+        signin: 'none',
+        reply: 'NOT-SIGNED-IN the page stayed blank',
+      });
+      await f.scan();
+      if (attempt === 1) {
+        f.advance(61_000);
+        await f.scan();
+      }
+    }
     f.advance(11 * 60_000);
   }
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 6);
   const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
   assert.equal(state.blocked.ncl, undefined);
   assert.equal(state.strikes.ncl, undefined);
+  assert.equal(state.accepted.length, 3);
 });
 
 test('a paused site resumes only from the data folder, never from the inbox', async (t) => {
@@ -1072,4 +1122,378 @@ test('asking the owner about a new list is recorded in the status file first', a
     JSON.parse(await readFile(join(dataDir, recordsFolder, statusFile), 'utf8')).reason,
     /not approved/,
   );
+});
+
+const signedPage = {
+  host: 'www.viking.com',
+  passwords: 0,
+  signOut: true,
+  markers: 0,
+  textLength: 900,
+};
+
+test('a sign-in is confirmed only by the exact line and a signed-in page', () => {
+  const said = { turn: 'succeeded', signin: 'submitted', reply: 'Welcome, Bill.\nSIGNED-IN' };
+  assert.deepEqual(signinVerdict(said, signedPage), {
+    confirmed: true,
+    cause: null,
+    reason: 'SIGNED-IN',
+  });
+  assert.equal(signinVerdict(said, { ...signedPage, passwords: 1 }).confirmed, false);
+  assert.equal(signinVerdict(said, { ...signedPage, host: 'login.viking.com' }).confirmed, false);
+  assert.equal(
+    signinVerdict(
+      said,
+      { ...signedPage, host: 'portal.example.com' },
+      { loginHosts: ['portal.example.com'] },
+    ).confirmed,
+    false,
+  );
+  assert.deepEqual(signinVerdict(said, undefined), {
+    confirmed: false,
+    cause: 'browser_error',
+    reason: 'SIGNED-IN',
+  });
+  assert.equal(signinVerdict(said, { ...signedPage, textLength: 3 }).cause, 'form_blank');
+  assert.equal(signinVerdict(said, { ...signedPage, signOut: false }).cause, 'not_finished');
+  assert.equal(signinVerdict(said, { ...signedPage, signOut: false, markers: 1 }).confirmed, true);
+  const freeForm = {
+    turn: 'succeeded',
+    signin: 'submitted',
+    reply:
+      '[Pleasant Advisor](https://www.pleasantadvisor.com/) shows a sign-in form; you are not signed in.',
+  };
+  assert.equal(signinVerdict(freeForm, signedPage).confirmed, false);
+  assert.equal(pageVerdict(signedPage).ok, true);
+});
+
+test('each failure gets one fixed cause, and the stored reason holds no long numbers', () => {
+  const cause = (text) => replyCause(text);
+  assert.equal(cause('NOT-SIGNED-IN: No matching saved login was found.'), 'vault_missing');
+  assert.equal(cause('NOT-SIGNED-IN the portal said the password is incorrect'), 'wrong_password');
+  assert.equal(cause('NOT-SIGNED-IN the site asked for a verification code'), 'code_asked');
+  assert.equal(cause('NOT-SIGNED-IN a CAPTCHA appeared'), 'captcha');
+  assert.equal(cause('NOT-SIGNED-IN the page stayed blank'), 'form_blank');
+  assert.equal(cause('NOT-SIGNED-IN the browser could not read the page'), 'browser_error');
+  assert.equal(cause('NOT-SIGNED-IN something odd'), 'other');
+  const verdict = signinVerdict(
+    {
+      turn: 'succeeded',
+      signin: 'none',
+      reply:
+        'Long story with private text.\nNOT-SIGNED-IN the site sent a code 482913 to bill@example.com',
+    },
+    undefined,
+  );
+  assert.equal(verdict.cause, 'code_asked');
+  assert.equal(verdict.reason, 'NOT-SIGNED-IN the site sent a code # to [email]');
+  assert.equal(signinVerdict({ turn: 'running' }, undefined).cause, 'not_finished');
+  assert.equal(signinVerdict(undefined, undefined).cause, 'not_finished');
+});
+
+test('the page check looks at the newest tab of the site, preferring the host Nod reported', () => {
+  const tab = (url, id) => ({
+    type: 'page',
+    url,
+    webSocketDebuggerUrl: `ws://127.0.0.1:9223/${id}`,
+  });
+  const targets = [
+    tab('https://evil.example.com/', 'a'),
+    tab('http://www.viking.com/', 'b'),
+    tab('https://login.viking.com/', 'c'),
+    tab('https://www.viking.com/travel-advisor', 'd'),
+    {
+      type: 'iframe',
+      url: 'https://www.viking.com/',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9223/e',
+    },
+  ];
+  assert.equal(pickTarget(targets, ['viking.com']).url, 'https://login.viking.com/');
+  assert.equal(
+    pickTarget(targets, ['viking.com'], 'www.viking.com').url,
+    'https://www.viking.com/travel-advisor',
+  );
+  assert.equal(pickTarget(targets, ['ncl.com']), undefined);
+  const checks = parseSigninChecks(
+    JSON.stringify({
+      sites: {
+        viking: {
+          signedIn: ['Welcome,', 'x'.repeat(200), 4],
+          loginHosts: ['Login.Viking.com', 'bad host'],
+        },
+        'Bad Key': { signedIn: ['a'] },
+      },
+    }),
+  );
+  assert.deepEqual(checks.get('viking'), {
+    signedIn: ['Welcome,'],
+    loginHosts: ['login.viking.com'],
+  });
+  assert.equal(checks.size, 1);
+  assert.equal(parseSigninChecks('{ nope').size, 0);
+});
+
+test('a page with a password field is never written as confirmed, and the reply is kept with its cause', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await writeFile(
+    join(f.dataDir, checksFile),
+    JSON.stringify({ sites: { ncl: { signedIn: ['Welcome,'] } } }),
+  );
+  f.setLook({
+    host: 'norwegiancentral.ncl.com',
+    passwords: 1,
+    signOut: false,
+    markers: 0,
+    textLength: 800,
+  });
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u1', {
+    turn: 'succeeded',
+    signin: 'submitted',
+    reply: '[Norwegian Central](https://norwegiancentral.ncl.com/) shows the account.\nSIGNED-IN',
+  });
+  await f.scan();
+  assert.deepEqual(f.looks.at(-1), {
+    site: 'ncl',
+    hosts: ['ncl.com'],
+    markers: ['Welcome,'],
+    prefer: 'norwegiancentral.ncl.com',
+  });
+  const log = await f.read('log.txt');
+  assert.match(log, / ncl unconfirmed sign-in outcome read \(not_finished\)\n$/);
+  assert.doesNotMatch(log, /ncl confirmed/);
+  const lines = (await f.read('replies/ncl.log.jsonl'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0].verdict, 'unconfirmed');
+  assert.equal(lines[0].cause, 'not_finished');
+  assert.equal(lines[0].reason, 'SIGNED-IN');
+  assert.equal(lines[0].page.passwords, 1);
+  assert.match(lines[0].at, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}-0[78]:00$/);
+  assert.ok(!JSON.stringify(lines[0]).includes('shows the account'));
+  assert.equal(JSON.parse(await f.read('replies/ncl.json')).cause, 'not_finished');
+  f.advance(11 * 60_000);
+  f.setLook(signedPage);
+  await f.drop('b.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u2', { turn: 'succeeded', signin: 'none', reply: 'Signed in.\nSIGNED-IN' });
+  await f.scan();
+  assert.match(await f.read('log.txt'), / ncl confirmed sign-in outcome read\n$/);
+  const kept = (await f.read('replies/ncl.log.jsonl'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    kept.map((line) => [line.verdict, line.cause]),
+    [
+      ['unconfirmed', 'not_finished'],
+      ['confirmed', null],
+    ],
+  );
+});
+
+test('a blank page is tried once more after a minute, outside the limits, and never a third time', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u1', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN the page stayed blank',
+  });
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+  assert.match(await f.read('log.txt'), / ncl retrying sign-in outcome read \(form_blank\)/);
+  await f.drop('b.json', JSON.stringify({ site: 'ncl' }));
+  f.advance(30_000);
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+  f.advance(31_000);
+  await f.scan();
+  assert.equal(f.calls.length, 2);
+  assert.deepEqual(JSON.parse(f.calls[1].init.body), {
+    url: 'https://sso.ncl.com/login',
+    job: 'signin',
+    retry: true,
+  });
+  let state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.accepted.length, 1);
+  assert.equal(state.pending.ncl.retried, true);
+  f.setOutcome('u2', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN the page stayed blank',
+  });
+  await f.scan();
+  f.advance(5 * 60_000);
+  await f.scan();
+  assert.equal(f.calls.length, 2);
+  const log = await f.read('log.txt');
+  assert.match(log, / ncl unconfirmed sign-in outcome read \(form_blank\) after one more try\n/);
+  assert.equal(log.match(/ ncl (confirmed|unconfirmed) /g).length, 1);
+  state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.strikes.ncl, undefined);
+  const kept = (await f.read('replies/ncl.log.jsonl'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    kept.map((line) => [line.verdict, line.cause, line.secondTry ?? false]),
+    [
+      ['retrying', 'form_blank', false],
+      ['unconfirmed', 'form_blank', true],
+    ],
+  );
+});
+
+test('a wrong password, a missing login, a code or a CAPTCHA is never tried again', async (t) => {
+  for (const reply of [
+    'NOT-SIGNED-IN the portal said the password is incorrect',
+    'NOT-SIGNED-IN: No matching saved login was found.',
+    'NOT-SIGNED-IN the site asked for a verification code',
+    'NOT-SIGNED-IN a CAPTCHA appeared',
+  ]) {
+    const f = await fixture();
+    t.after(f.stop);
+    await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    f.setOutcome('u1', { turn: 'succeeded', signin: 'submitted', reply });
+    await f.scan();
+    f.advance(5 * 60_000);
+    await f.scan();
+    assert.equal(f.calls.length, 1, reply);
+    assert.doesNotMatch(await f.read('log.txt'), /retrying/);
+  }
+});
+
+test('a second try waits while Nod is busy and gives up after 15 minutes', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setLook(undefined);
+  f.setOutcome('u1', { turn: 'succeeded', signin: 'submitted', reply: 'SIGNED-IN' });
+  await f.scan();
+  assert.match(await f.read('log.txt'), /ncl retrying sign-in outcome read \(browser_error\)/);
+  f.setIdle(false);
+  f.advance(2 * 60_000);
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+  f.advance(16 * 60_000);
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+  assert.match(
+    await f.read('log.txt'),
+    / ncl unconfirmed sign-in outcome read \(browser_error\)\n$/,
+  );
+  assert.equal(
+    JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8')).pending.ncl,
+    undefined,
+  );
+});
+
+test('the health file follows the same state rules as the 4Vacations check', async (t) => {
+  const now = Date.parse('2026-11-22T18:00:00-08:00');
+  const log = [
+    '2026-11-22 06:01:21 cruisingpower confirmed sign-in outcome read',
+    '2026-11-22 12:31:22 cruisingpower confirmed sign-in outcome read',
+    '2026-11-22 06:03:29 disney unconfirmed sign-in outcome read',
+    '2026-11-22 12:31:22 disney unconfirmed sign-in outcome read',
+    '2026-11-22 06:01:42 goccl confirmed sign-in outcome read',
+    '2026-11-22 12:32:18 goccl unconfirmed sign-in outcome read (form_blank)',
+    '2026-11-22 06:02:48 ncl confirmed sign-in outcome read',
+    '2026-11-21 06:00:00 ncl unconfirmed sign-in outcome read',
+    '2026-11-21 07:00:00 ncl unconfirmed sign-in outcome read',
+    '2026-11-22 12:00:00 ncl confirmed sign-in outcome read',
+    '2026-11-22 12:00:01 ncl retrying sign-in outcome read (form_blank)',
+    '2026-11-22 12:00:02 cruisingpower.status confirmed job outcome read',
+    '2026-11-19 12:00:00 virgin confirmed sign-in outcome read',
+    '2026-11-22 15:06:48 disney rejected rate limit: one request per site every 10 minutes',
+  ].join('\n');
+  const report = signinHealth(log, {
+    now,
+    sites: ['viking', 'virgin'],
+    causes: { disney: 'form_blank' },
+  });
+  const by = Object.fromEntries(report.sites.map((site) => [site.site, site]));
+  assert.equal(report.updatedAt, '2026-11-22T18:00:00-08:00');
+  assert.equal(by.cruisingpower.state, 'ok');
+  assert.equal(by.cruisingpower.lastConfirmedAt, '2026-11-22T12:31:22-08:00');
+  assert.equal(by.disney.state, 'down');
+  assert.deepEqual(by.disney.counts48h, { confirmed: 0, unconfirmed: 2, rejected: 1 });
+  assert.equal(by.disney.lastCause, 'form_blank');
+  assert.equal(by.goccl.state, 'flaky');
+  assert.equal(by.ncl.state, 'flaky');
+  assert.equal(by.viking.state, 'unknown');
+  assert.equal(by.virgin.state, 'unknown');
+  assert.equal(by.virgin.lastConfirmedAt, '2026-11-19T12:00:00-08:00');
+  assert.equal(by['cruisingpower.status'], undefined);
+
+  const f = await fixture();
+  t.after(f.stop);
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u1', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN: No matching saved login was found.',
+  });
+  await f.scan();
+  const health = JSON.parse(await f.read(healthFile));
+  const ncl = health.sites.find((site) => site.site === 'ncl');
+  assert.equal(ncl.state, 'down');
+  assert.equal(ncl.lastCause, 'vault_missing');
+  assert.equal(ncl.counts48h.unconfirmed, 1);
+  assert.deepEqual(
+    health.sites.map((site) => site.site),
+    ['cruisingpower', 'disney', 'ncl'],
+  );
+});
+
+test('a site may name other login origins; only clean https origins pass and the post carries them', async (t) => {
+  const parsed = parseAllowList(
+    JSON.stringify({
+      sites: {
+        viking: {
+          url: 'https://www.viking.com/travel-advisor',
+          loginOrigins: ['https://login.viking.com'],
+        },
+        bad: { url: 'https://www.bad.com/', loginOrigins: ['https://login.bad.com/path'] },
+        worse: { url: 'https://www.worse.com/', loginOrigins: ['http://login.worse.com'] },
+        many: {
+          url: 'https://www.many.com/',
+          loginOrigins: [
+            'https://a.many.com',
+            'https://b.many.com',
+            'https://c.many.com',
+            'https://d.many.com',
+            'https://e.many.com',
+          ],
+        },
+        plain: { url: 'https://www.plain.com/' },
+      },
+    }),
+  );
+  assert.deepEqual([...parsed.sites.keys()], ['viking', 'plain']);
+  assert.deepEqual(parsed.skipped.sort(), ['bad', 'many', 'worse']);
+  assert.deepEqual(parsed.origins.get('viking'), ['https://login.viking.com']);
+  assert.equal(parsed.origins.has('plain'), false);
+  assert.match(
+    allowListDialog(parsed.sites, new Set(), parsed.origins).detail,
+    /https:\/\/login\.viking\.com/,
+  );
+  const f = await fixture({ origins: new Map([['ncl', ['https://sso.ncl.com']]]) });
+  t.after(f.stop);
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  assert.deepEqual(JSON.parse(f.calls[0].init.body), {
+    url: 'https://sso.ncl.com/login',
+    job: 'signin',
+    loginOrigins: ['https://sso.ncl.com'],
+  });
 });
