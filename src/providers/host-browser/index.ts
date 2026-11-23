@@ -47,6 +47,7 @@ export function createHostBrowserComputer(options: {
   dataRoot: string;
   browserExecutable?: string;
   attach?: string;
+  foreground?: boolean;
   driver?: string;
   maxLiveSessions?: number;
 }): Computer {
@@ -57,6 +58,7 @@ export function createHostBrowserComputer(options: {
       dataRoot,
       executable,
       attach: hostBrowserAddress(options.attach),
+      foreground: options.foreground,
       maxLiveSessions: options.maxLiveSessions,
     });
     return {

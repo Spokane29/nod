@@ -53,6 +53,7 @@ import { appOpenPath } from './app-links.mjs';
 import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
 import {
+  cdpBringForward,
   cdpPageCheck,
   cdpPressFilled,
   prepareSigninInbox,
@@ -573,6 +574,15 @@ async function signinOutcome(turnId) {
   return response.ok ? response.json() : undefined;
 }
 
+async function browserForeground() {
+  if (process.env.NOD_BROWSER_FOREGROUND !== undefined)
+    return process.env.NOD_BROWSER_FOREGROUND.trim() === '1';
+  return readFile(join(app.getPath('userData'), 'browser-foreground'), 'utf8').then(
+    () => true,
+    () => false,
+  );
+}
+
 async function startSigninInboxFromSettings() {
   stopSigninInbox?.();
   stopSigninInbox = undefined;
@@ -607,13 +617,16 @@ async function startSigninInboxFromSettings() {
     status: (fields) => writeSigninStatus(dataDir, fields),
   });
   if (!prepared || quitting) return;
+  const foreground = await browserForeground();
   stopSigninInbox = startSigninInbox({
     ...prepared,
     request: (path, options) => engineRequest(path, options),
     isIdle: engineIdle,
     outcome: signinOutcome,
     pageCheck: cdpPageCheck(dataDir),
-    pressFilled: cdpPressFilled(dataDir),
+    pressFilled: cdpPressFilled(dataDir, foreground),
+    foreground,
+    bringForward: cdpBringForward(dataDir),
     holdKey: async () => (await readFile(join(dataDir, 'autohold-key'), 'utf8')).trim(),
   }).stop;
 }
@@ -2527,6 +2540,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     process.env.NOD_INVOICE_FOLDER ??
     (await readFile(join(app.getPath('userData'), 'invoice-folder'), 'utf8').catch(() => ''))
   ).trim();
+  const foreground = await browserForeground();
   const build = buildIdentity(nodBuild);
   const started = Date.now();
   const environment = {
@@ -2553,6 +2567,7 @@ async function startEngine({ runtime, signal, pending = false }) {
     NOD_WEB_ROOT: join(engineRoot, 'dist', 'web'),
     ...(browserExecutable ? { NOD_BROWSER_EXECUTABLE: browserExecutable } : {}),
     ...(browserCdp ? { NOD_BROWSER_CDP: browserCdp } : {}),
+    ...(foreground ? { NOD_BROWSER_FOREGROUND: '1' } : {}),
     ...(/^[1-3]$/.test(portalParallel) ? { NOD_PORTAL_PARALLEL: portalParallel } : {}),
     ...(invoiceFolder ? { NOD_INVOICE_FOLDER: invoiceFolder } : {}),
     ...(process.env.NOD_FEEDBACK_URL === '' ? { NOD_FEEDBACK_ENABLED: 'false' } : {}),

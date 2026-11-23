@@ -638,12 +638,18 @@ async function fixture(options = {}) {
   let press = { pressed: true, host: 'identity.example.com' };
   let look = { host: 'www.example.com', passwords: 0, signOut: true, markers: 0, textLength: 500 };
   const looks = [];
+  const forwards = [];
   const handle = startSigninInbox({
     inbox,
     dataDir,
     sites,
     origins: options.origins,
     limits: { retryMs: 60_000 },
+    foreground: options.foreground,
+    bringForward: async (request) => {
+      forwards.push(request);
+      return { brought: true, host: 'sso.ncl.com' };
+    },
     pressFilled: async (request) => {
       presses.push(request);
       return press;
@@ -685,6 +691,7 @@ async function fixture(options = {}) {
     setPress: (value) => (press = value),
     presses,
     looks,
+    forwards,
     checks: () => idleChecks,
     advance: (ms) => (clock += ms),
     drop: (name, content) => writeFile(join(inbox, name), content),
@@ -1166,7 +1173,25 @@ test('a sign-in is confirmed only by the exact line and a signed-in page', () =>
     reason: 'SIGNED-IN',
   });
   assert.equal(signinVerdict(said, { ...signedPage, textLength: 3 }).cause, 'form_blank');
-  assert.equal(signinVerdict(said, { ...signedPage, signOut: false }).cause, 'not_finished');
+  assert.deepEqual(signinVerdict(said, { ...signedPage, signOut: false }), {
+    confirmed: false,
+    cause: 'no_marker',
+    reason: 'SIGNED-IN',
+  });
+  assert.equal(
+    signinVerdict(said, { ...signedPage, signOut: false, passwords: 1 }).cause,
+    'not_finished',
+  );
+  assert.equal(
+    signinVerdict(said, { ...signedPage, signOut: false, textLength: 3 }).cause,
+    'form_blank',
+  );
+  assert.equal(
+    signinVerdict({ ...said, reply: 'Welcome, Bill.' }, { ...signedPage, signOut: false })
+      .confirmed,
+    false,
+  );
+  assert.equal(filledVerdict({ ...signedPage, signOut: false }).cause, 'not_finished');
   assert.equal(signinVerdict(said, { ...signedPage, signOut: false, markers: 1 }).confirmed, true);
   const freeForm = {
     turn: 'succeeded',
@@ -1365,6 +1390,94 @@ test('a blank page is tried once more after a minute, outside the limits, and ne
       ['unconfirmed', 'form_blank', true],
     ],
   );
+});
+
+test('in background mode a blank page brings the site tab forward for the one retry only', async (t) => {
+  for (const [foreground, reply, expected] of [
+    [false, 'NOT-SIGNED-IN the page stayed blank', 1],
+    [true, 'NOT-SIGNED-IN the page stayed blank', 0],
+    [false, 'NOT-SIGNED-IN the browser could not read the page', 0],
+  ]) {
+    const f = await fixture({ foreground });
+    t.after(f.stop);
+    await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    f.setOutcome('u1', {
+      turn: 'succeeded',
+      signin: 'none',
+      reply: `[NCL](https://sso.ncl.com/login)\n${reply}`,
+    });
+    await f.scan();
+    assert.equal(f.forwards.length, 0);
+    f.advance(61_000);
+    await f.scan();
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.forwards.length, expected, `${foreground} ${reply}`);
+    const log = await f.read('accepted-log.txt');
+    if (expected) {
+      assert.deepEqual(f.forwards[0], { site: 'ncl', hosts: ['ncl.com'], prefer: 'sso.ncl.com' });
+      assert.match(
+        log,
+        / ncl accepted posted one more try with the site tab brought to the front for this try only \(form_blank in background mode\)\n$/,
+      );
+    } else assert.match(log, / ncl accepted posted one more try\n$/);
+    f.setOutcome('u2', { turn: 'succeeded', signin: 'none', reply });
+    await f.scan();
+    assert.equal(f.forwards.length, expected);
+  }
+});
+
+test('a signed-in page with no sign-out control or marker is no_marker and never pauses the site', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  f.setLook({ host: 'www.ncl.com', passwords: 0, signOut: false, markers: 0, textLength: 800 });
+  for (const [index, name] of ['a.json', 'b.json', 'c.json'].entries()) {
+    await f.drop(name, JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    f.setOutcome(`u${index + 1}`, {
+      turn: 'succeeded',
+      signin: 'submitted',
+      reply: 'Signed in.\nSIGNED-IN',
+    });
+    await f.scan();
+    f.advance(11 * 60_000);
+  }
+  assert.equal(f.calls.length, 3);
+  const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.strikes.ncl, undefined);
+  assert.equal(state.blocked.ncl, undefined);
+  const log = await f.read('log.txt');
+  assert.equal(log.match(/ ncl unconfirmed sign-in outcome read \(no_marker\)\n/g).length, 3);
+  assert.doesNotMatch(log, /ncl confirmed|ncl retrying/);
+  const lines = (await f.read('replies/ncl.log.jsonl'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    lines.map((line) => [line.verdict, line.cause, line.page.signOut, line.page.markers]),
+    Array(3).fill(['unconfirmed', 'no_marker', false, 0]),
+  );
+  const health = JSON.parse(await f.read(healthFile));
+  assert.equal(health.sites.find((site) => site.site === 'ncl').lastCause, 'no_marker');
+});
+
+test('a CAPTCHA after a typed login never pauses the site, and a wrong password still does', async (t) => {
+  for (const [reply, blocked] of [
+    ['NOT-SIGNED-IN a Cloudflare "Verify you are human" check appeared after the login', undefined],
+    ['NOT-SIGNED-IN the portal said the password is incorrect', true],
+  ]) {
+    const f = await fixture();
+    t.after(f.stop);
+    for (const [index, name] of ['a.json', 'b.json'].entries()) {
+      await f.drop(name, JSON.stringify({ site: 'ncl' }));
+      await f.scan();
+      f.setOutcome(`u${index + 1}`, { turn: 'succeeded', signin: 'submitted', reply });
+      await f.scan();
+      f.advance(11 * 60_000);
+    }
+    const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+    assert.equal(state.blocked.ncl, blocked, reply);
+  }
 });
 
 test('a wrong password, a missing login, a code or a CAPTCHA is never tried again', async (t) => {
@@ -1580,13 +1693,16 @@ test('the press finds one filled form on the site and clicks its one button, and
     [
       'ws://127.0.0.1:9223/b',
       [
-        ['Page.bringToFront', null],
+        ['Emulation.setFocusEmulationEnabled', null],
         ['Input.dispatchMouseEvent', 'mouseMoved'],
         ['Input.dispatchMouseEvent', 'mousePressed'],
         ['Input.dispatchMouseEvent', 'mouseReleased'],
       ],
     ],
   ]);
+  sent.length = 0;
+  await pressFilledForm({ port: 9223, hosts, send, foreground: true });
+  assert.deepEqual(sent[1][1][0], ['Page.bringToFront', null]);
   sent.length = 0;
   probe = { ok: false, reason: 'the form is not filled' };
   assert.deepEqual(await pressFilledForm({ port: 9223, hosts, send }), {

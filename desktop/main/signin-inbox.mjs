@@ -29,10 +29,11 @@ export const signinCauses = [
   'form_blank',
   'browser_error',
   'not_finished',
+  'no_marker',
   'other',
 ];
 const retryCauses = new Set(['form_blank', 'browser_error']);
-const noStrikeCauses = new Set(['form_blank', 'browser_error']);
+const noStrikeCauses = new Set(['form_blank', 'browser_error', 'no_marker', 'captcha']);
 const filledCauses = new Set(['vault_missing', 'not_finished']);
 const allowBytes = 65_536;
 const stateBytes = 65_536;
@@ -703,7 +704,7 @@ export function pageVerdict(look, check = {}) {
   if (look.passwords > 0 || loginHost(look.host, check.loginHosts))
     return { ok: false, cause: 'not_finished' };
   if (!(look.textLength >= 40)) return { ok: false, cause: 'form_blank' };
-  if (!look.signOut && !(look.markers > 0)) return { ok: false, cause: 'not_finished' };
+  if (!look.signOut && !(look.markers > 0)) return { ok: false, cause: 'no_marker' };
   return { ok: true, cause: null };
 }
 
@@ -920,7 +921,14 @@ async function siteTarget(port, hosts, prefer, timeoutMs) {
   return address.hostname === '127.0.0.1' || address.hostname === 'localhost' ? target : undefined;
 }
 
-export async function pressFilledForm({ port, hosts, prefer, timeoutMs = 5000, send = cdpSend }) {
+export async function pressFilledForm({
+  port,
+  hosts,
+  prefer,
+  foreground = false,
+  timeoutMs = 5000,
+  send = cdpSend,
+}) {
   const target = await siteTarget(port, hosts, prefer, timeoutMs);
   if (!target) return { pressed: false, reason: 'no tab on the site' };
   const host = new URL(target.url).hostname;
@@ -936,7 +944,9 @@ export async function pressFilledForm({ port, hosts, prefer, timeoutMs = 5000, s
   await send(
     target.webSocketDebuggerUrl,
     [
-      ['Page.bringToFront', {}],
+      foreground
+        ? ['Page.bringToFront', {}]
+        : ['Emulation.setFocusEmulationEnabled', { enabled: true }],
       ['Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y }],
       ['Input.dispatchMouseEvent', { type: 'mousePressed', ...at }],
       ['Input.dispatchMouseEvent', { type: 'mouseReleased', ...at }],
@@ -946,11 +956,33 @@ export async function pressFilledForm({ port, hosts, prefer, timeoutMs = 5000, s
   return { pressed: true, host };
 }
 
-export function cdpPressFilled(dataDir) {
+export function cdpPressFilled(dataDir, foreground = false) {
   return async ({ hosts, prefer }) => {
     const port = ((await readSmall(join(dataDir, 'browser-cdp'), 64)) ?? '').trim();
-    return pressFilledForm({ port, hosts, prefer }).catch(() => ({
+    return pressFilledForm({ port, hosts, prefer, foreground }).catch(() => ({
       pressed: false,
+      reason: 'the browser could not be reached',
+    }));
+  };
+}
+
+export async function bringSiteForward({ port, hosts, prefer, timeoutMs = 5000 }) {
+  const target = await siteTarget(port, hosts, prefer, timeoutMs);
+  if (!target || typeof target.id !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(target.id))
+    return { brought: false, reason: 'no tab on the site' };
+  const response = await fetch(`http://127.0.0.1:${port}/json/activate/${target.id}`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  return response.ok
+    ? { brought: true, host: new URL(target.url).hostname }
+    : { brought: false, reason: 'the browser refused to bring the tab forward' };
+}
+
+export function cdpBringForward(dataDir) {
+  return async ({ hosts, prefer }) => {
+    const port = ((await readSmall(join(dataDir, 'browser-cdp'), 64)) ?? '').trim();
+    return bringSiteForward({ port, hosts, prefer }).catch(() => ({
+      brought: false,
       reason: 'the browser could not be reached',
     }));
   };
@@ -965,7 +997,11 @@ export function filledVerdict(look, check = {}) {
   if (look.passwords > 0 && look.loginError)
     return { confirmed: false, cause: 'wrong_password', reason };
   const page = pageVerdict(look, check);
-  return { confirmed: page.ok, cause: page.cause, reason };
+  return {
+    confirmed: page.ok,
+    cause: page.cause === 'no_marker' ? 'not_finished' : page.cause,
+    reason,
+  };
 }
 
 export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5000 }) {
@@ -1466,6 +1502,17 @@ export function startSigninInbox(options) {
         .then(() => isIdle('signin'))
         .catch(() => false));
     let response;
+    let forward;
+    if (idle && entry.cause === 'form_blank' && !options.foreground && options.bringForward)
+      forward = await Promise.resolve()
+        .then(() =>
+          options.bringForward({
+            site: key,
+            hosts: siteHosts(url, origins.get(key) ?? []),
+            prefer: entry.host,
+          }),
+        )
+        .catch(() => ({ brought: false, reason: 'the browser could not be reached' }));
     if (idle)
       try {
         response = await post({ site: key, url, job: 'signin' }, true);
@@ -1498,7 +1545,15 @@ export function startSigninInbox(options) {
     gate.track(key, posted.turnId, clock(), entry.ref);
     gate.state.pending[key].retried = true;
     await gate.save().catch(() => {});
-    await log(key, 'accepted', 'posted one more try');
+    await log(
+      key,
+      'accepted',
+      forward
+        ? forward.brought
+          ? 'posted one more try with the site tab brought to the front for this try only (form_blank in background mode)'
+          : `posted one more try; the site tab could not be brought to the front (${String(forward.reason ?? 'unknown').slice(0, 60)})`
+        : 'posted one more try',
+    );
     return true;
   }
 
@@ -1612,6 +1667,7 @@ export function startSigninInbox(options) {
           cause: verdict.cause,
           reason: verdict.reason,
           turnId,
+          ...(replyHost(outcome?.reply) ? { host: replyHost(outcome?.reply) } : {}),
           ...(ref ? { ref } : {}),
         });
         await gate.save().catch(() => {});

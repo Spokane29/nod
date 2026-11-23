@@ -519,7 +519,11 @@ export function createDefaultAdapters(
       traces,
     }),
     computer: env.NOD_BROWSER_CDP
-      ? createHostBrowserComputer({ dataRoot, attach: env.NOD_BROWSER_CDP })
+      ? createHostBrowserComputer({
+          dataRoot,
+          attach: env.NOD_BROWSER_CDP,
+          foreground: env.NOD_BROWSER_FOREGROUND === '1',
+        })
       : env.NOD_BROWSER_EXECUTABLE
         ? createHostBrowserComputer({ dataRoot, browserExecutable: env.NOD_BROWSER_EXECUTABLE })
         : createContainerBrowserComputer({ dataRoot, container: env.BROWSER_CONTAINER }),

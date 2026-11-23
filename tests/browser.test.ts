@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter, once } from 'node:events';
 import { constants } from 'node:fs';
 import {
@@ -1145,6 +1145,126 @@ test('discarding a thread closes its browser and deletes only its throwaway data
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+for (const foreground of [false, true])
+  test(`an attached browser ${foreground ? 'brings its tab to the front only when set to' : 'keeps its tab awake in the background without bringing the window forward'}`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'nod-attach-focus-'));
+    const requests: string[] = [];
+    const inspector: string[] = [];
+    const upgraded = new Set<Socket>();
+    let active = 'own-tab';
+    const server = createHttpServer((request, response) => {
+      requests.push(String(request.url));
+      response.setHeader('content-type', 'application/json');
+      response.end(
+        request.url === '/json'
+          ? JSON.stringify([
+              { id: 'own-tab', type: 'page', url: 'about:blank' },
+              { id: 'site-tab', type: 'page', url: 'https://www.example.com/account' },
+            ])
+          : '{}',
+      );
+    });
+    server.on('upgrade', (request, socket: Socket) => {
+      const accept = createHash('sha1')
+        .update(`${request.headers['sec-websocket-key']}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest('base64');
+      socket.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+      );
+      upgraded.add(socket);
+      socket.on('error', () => {});
+      socket.on('data', (frame: Buffer) => {
+        if ((frame[0]! & 0x0f) !== 1) return;
+        let length = frame[1]! & 0x7f;
+        let offset = 2;
+        if (length === 126) {
+          length = frame.readUInt16BE(2);
+          offset = 4;
+        }
+        const mask = frame.subarray(offset, offset + 4);
+        const body = frame
+          .subarray(offset + 4, offset + 4 + length)
+          .map((byte, index) => byte ^ mask[index % 4]!);
+        const message = JSON.parse(Buffer.from(body).toString()) as {
+          id: number;
+          method: string;
+          params: { targetId?: string };
+        };
+        inspector.push(
+          message.method === 'Target.attachToTarget'
+            ? `${message.method} ${message.params.targetId}`
+            : message.method,
+        );
+        const data = Buffer.from(
+          JSON.stringify({
+            id: message.id,
+            result: message.method === 'Target.attachToTarget' ? { sessionId: 'page' } : {},
+          }),
+        );
+        socket.write(Buffer.concat([Buffer.from([0x81, data.length]), data]));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const computer = createAgentBrowserComputer({
+      dataRoot: directory,
+      attach: String(address.port),
+      foreground,
+      run: async (_executable, args) => ({
+        exitCode: 0,
+        stderr: '',
+        stdout: JSON.stringify(
+          args.includes('info')
+            ? {
+                success: true,
+                data: {
+                  active: true,
+                  namespace: args[args.indexOf('--namespace') + 1],
+                  session: args[args.indexOf('--session') + 1],
+                  socketDir: directory,
+                },
+              }
+            : { success: true, data: {} },
+        ),
+      }),
+      daemonCommand: async (_path, command) => {
+        if (command.action === 'tab_list') return { tabs: [{ active: true, targetId: active }] };
+        if (command.action === 'tab_switch') active = String(command.tabId);
+        if (command.action === 'cdp_url')
+          return { cdpUrl: `ws://127.0.0.1:${address.port}/devtools/browser/synthetic` };
+        return {};
+      },
+    });
+    try {
+      for (let index = 0; index < 2; index++)
+        await computer
+          .act('attach', { action: 'open', url: 'https://www.example.com/account' })
+          .catch(() => undefined);
+      const activations = requests.filter((url) => url.startsWith('/json/activate/'));
+      if (foreground) {
+        assert.deepEqual(activations, ['/json/activate/site-tab', '/json/activate/site-tab']);
+        assert.deepEqual(inspector, []);
+      } else {
+        assert.deepEqual(activations, []);
+        assert.deepEqual(inspector.slice(0, 2), [
+          'Target.attachToTarget site-tab',
+          'Emulation.setFocusEmulationEnabled',
+        ]);
+        assert.equal(
+          inspector.filter((method) => method.startsWith('Target.attachToTarget')).length,
+          1,
+        );
+      }
+    } finally {
+      await computer.dispose().catch(() => {});
+      for (const socket of upgraded) socket.destroy();
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
 test('a browser that will not close is killed with its process groups so the next open starts fresh', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'nod-browser-drain-failure-'));

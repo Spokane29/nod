@@ -72,6 +72,7 @@ interface BrowserState {
   saved: StoredScreen;
   browserExecutable?: string;
   tabTarget?: string;
+  awake?: { targetId: string; close(): void };
 }
 export interface BrowserDiagnostic {
   at: string;
@@ -232,6 +233,7 @@ export function createAgentBrowserComputer(options: {
   headless?: boolean;
   visible?: boolean;
   attach?: string;
+  foreground?: boolean;
   evictIdleMs?: number;
   maxLiveSessions?: number;
   viewport?: { width: number; height: number };
@@ -441,6 +443,8 @@ export function createAgentBrowserComputer(options: {
     /^@?(?:ref=)?(e\d+)$/.exec(value?.trim() ?? '')?.[1];
 
   async function shutDown(state: BrowserState) {
+    state.awake?.close();
+    delete state.awake;
     try {
       await command(state, { action: 'close' }, { timeoutMs: 5000 });
     } catch {
@@ -1522,7 +1526,10 @@ export function createAgentBrowserComputer(options: {
         return false;
       }
     });
-    if (!reuse) return;
+    if (!reuse) {
+      if (!options.foreground) await foreground(state, signal);
+      return;
+    }
     state.tabTarget = reuse.id;
     try {
       await command(state, { action: 'tab_switch', tabId: reuse.id }, { signal });
@@ -1540,7 +1547,20 @@ export function createAgentBrowserComputer(options: {
         .array(z.object({ active: z.boolean(), targetId: z.string() }).passthrough())
         .parse((await command(state, { action: 'tab_list' }, { signal })).tabs)
         .find((item) => item.active);
-      if (tab) await fetch(`http://127.0.0.1:${attach}/json/activate/${tab.targetId}`, { signal });
+      if (!tab) return;
+      if (options.foreground) {
+        await fetch(`http://127.0.0.1:${attach}/json/activate/${tab.targetId}`, { signal });
+        return;
+      }
+      if (state.awake?.targetId === tab.targetId) return;
+      state.awake?.close();
+      delete state.awake;
+      const { cdpUrl } = z
+        .object({ cdpUrl: z.string() })
+        .passthrough()
+        .parse(await command(state, { action: 'cdp_url' }, { signal }));
+      const devtools = await openDevtools(cdpUrl, tab.targetId, signal);
+      state.awake = { targetId: tab.targetId, close: () => devtools.close() };
     } catch {}
   }
 
