@@ -698,7 +698,8 @@ export function loginHost(host, extra = []) {
 }
 
 export function pageVerdict(look, check = {}) {
-  if (!look || typeof look !== 'object') return { ok: false, cause: 'browser_error' };
+  if (!look || typeof look !== 'object' || look.host === 'chromewebdata')
+    return { ok: false, cause: 'browser_error' };
   if (look.passwords > 0 || loginHost(look.host, check.loginHosts))
     return { ok: false, cause: 'not_finished' };
   if (!(look.textLength >= 40)) return { ok: false, cause: 'form_blank' };
@@ -708,7 +709,12 @@ export function pageVerdict(look, check = {}) {
 
 export function replyCause(reply) {
   const t = String(reply ?? '').toLowerCase();
-  if (/captcha|are you a robot|verify you are human/.test(t)) return 'captcha';
+  if (
+    /captcha|are you a robot|verify you are human|cloudflare|just a moment|checking your browser/.test(
+      t,
+    )
+  )
+    return 'captcha';
   if (
     /verification code|one-time|two-factor|2fa|asked for a code|asks for a code|enter the code|code (?:was )?sent|sent (?:a|the) code/.test(
       t,
@@ -795,7 +801,7 @@ export function pageProbe(markers = []) {
     signOut,
     markers: markers.filter((marker) => lower.includes(marker)).length,
     textLength: text.trim().length,
-    captcha: /captcha|are you a robot|verify you are human/.test(lower) || /recaptcha|hcaptcha|turnstile/i.test(frames),
+    captcha: /captcha|are you a robot|verify you are human|checking your browser|performing security verification/.test(lower) || /^just a moment/i.test(document.title) || /recaptcha|hcaptcha|turnstile|challenges\.cloudflare\.com/i.test(frames),
     codeAsked: /verification code|one-time|security code|enter the code|code (?:was )?sent|two-factor|2fa/.test(lower),
     loginError: /incorrect|invalid (?:user ?name|email|password|credentials)|login failed|authentication failed|not recogni[sz]ed|try again/.test(lower),
   };

@@ -1751,3 +1751,22 @@ test('a turn that waits for private entry typed nothing and never pauses a site'
   assert.equal(state.blocked.ncl, undefined);
   assert.equal(state.strikes.ncl, undefined);
 });
+
+test('a Chrome error page after the press is a browser error, and a Cloudflare check is a CAPTCHA', () => {
+  const page = { host: 'chromewebdata', passwords: 0, signOut: false, markers: 0, textLength: 178 };
+  assert.equal(filledVerdict(page).cause, 'browser_error');
+  assert.equal(pageVerdict(page).cause, 'browser_error');
+  assert.equal(replyCause('NOT-SIGNED-IN: Cloudflare showed Just a moment'), 'captcha');
+  assert.equal(replyCause('NOT-SIGNED-IN: the page asked me to verify you are human'), 'captcha');
+  assert.equal(
+    filledVerdict({
+      host: 'agents.globusfamily.com',
+      passwords: 0,
+      signOut: false,
+      markers: 0,
+      textLength: 300,
+      captcha: true,
+    }).cause,
+    'captcha',
+  );
+});
