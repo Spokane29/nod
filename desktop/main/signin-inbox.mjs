@@ -720,7 +720,7 @@ export function replyCause(reply) {
   )
     return 'wrong_password';
   if (
-    /no (?:matching )?saved (?:vault )?login|no saved login|couldn.t find a matching|matching saved (?:vault )?login was found|saved login is for a different/.test(
+    /no (?:matching )?saved (?:vault )?login|no saved login|couldn.t find a matching|matching saved (?:vault )?login was found|saved login is for a different|saved login is for \S+, not/.test(
       t,
     )
   )

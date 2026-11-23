@@ -1171,6 +1171,10 @@ test('each failure gets one fixed cause, and the stored reason holds no long num
   const cause = (text) => replyCause(text);
   assert.equal(cause('NOT-SIGNED-IN: No matching saved login was found.'), 'vault_missing');
   assert.equal(cause('NOT-SIGNED-IN the portal said the password is incorrect'), 'wrong_password');
+  assert.equal(
+    cause('NOT-SIGNED-IN: The saved login is for goccl.com, not the form’s www.goccl.com origin.'),
+    'vault_missing',
+  );
   assert.equal(cause('NOT-SIGNED-IN the site asked for a verification code'), 'code_asked');
   assert.equal(cause('NOT-SIGNED-IN a CAPTCHA appeared'), 'captcha');
   assert.equal(cause('NOT-SIGNED-IN the page stayed blank'), 'form_blank');
