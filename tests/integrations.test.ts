@@ -4394,13 +4394,30 @@ test(
         ['Shop 7'],
       );
       await assert.rejects(integrations.list('another-user'), { statusCode: 403 });
+      const sameSite = await integrations.manageConnections(
+        'list',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'identity.example.test',
+      );
+      assert.ok(Array.isArray(sameSite));
+      assert.ok(
+        savedLoginIds.every((id) =>
+          sameSite.some(
+            (connection) =>
+              'savedLogin' in connection && connection.savedLogin && connection.connectionId === id,
+          ),
+        ),
+      );
       const wrongSite = await integrations.manageConnections(
         'list',
         undefined,
         undefined,
         undefined,
         undefined,
-        'example.test',
+        'example.org',
       );
       assert.ok(Array.isArray(wrongSite));
       assert.equal(

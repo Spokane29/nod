@@ -26,6 +26,7 @@ import {
   DiscoveredConnectionError,
   type createDiscoveredConnections,
 } from './discovered-connections.ts';
+import { sitePattern } from './vault.ts';
 import { bundledApps } from './app-catalog.ts';
 import { transaction } from './transaction.ts';
 import type { WorkAdmission } from './work-admission.ts';
@@ -180,6 +181,18 @@ type IntegrationOptions = {
   mailCheck?: MailCheck;
   paused?(): Promise<boolean>;
 };
+
+export function savedLoginMatches(site: string, origin: string | undefined) {
+  try {
+    const saved = new URL(origin!);
+    return (
+      saved.host.toLowerCase().replace(/^www\./, '') === site ||
+      new RegExp(sitePattern(new URL(`https://${site}`).origin)).test(saved.origin)
+    );
+  } catch {
+    return false;
+  }
+}
 
 function browserService(origin: string) {
   const url = new URL(origin);
@@ -3053,13 +3066,7 @@ export async function createIntegrations(pool: Pool, options: IntegrationOptions
         const matching = site
           ? logins.filter((connection) => {
               const origin = connection.accessPaths?.[0]?.endpoint;
-              if (site.includes('.') || site.includes(':')) {
-                try {
-                  return new URL(origin!).host.toLowerCase().replace(/^www\./, '') === site;
-                } catch {
-                  return false;
-                }
-              }
+              if (site.includes('.') || site.includes(':')) return savedLoginMatches(site, origin);
               return ` ${[connection.name, connection.accountName]
                 .join(' ')
                 .toLowerCase()
