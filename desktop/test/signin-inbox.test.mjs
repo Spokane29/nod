@@ -43,6 +43,9 @@ import {
   heldBooking,
   holdSignature,
   checksFile,
+  filledProbe,
+  filledVerdict,
+  pressFilledForm,
   healthFile,
   pageVerdict,
   parseSigninChecks,
@@ -631,6 +634,8 @@ async function fixture(options = {}) {
   let clock = Date.now();
   let status = 200;
   let outcomes = {};
+  const presses = [];
+  let press = { pressed: true, host: 'identity.example.com' };
   let look = { host: 'www.example.com', passwords: 0, signOut: true, markers: 0, textLength: 500 };
   const looks = [];
   const handle = startSigninInbox({
@@ -639,6 +644,10 @@ async function fixture(options = {}) {
     sites,
     origins: options.origins,
     limits: { retryMs: 60_000 },
+    pressFilled: async (request) => {
+      presses.push(request);
+      return press;
+    },
     pageCheck: async (request) => {
       looks.push(request);
       return typeof look === 'function' ? look(request) : look;
@@ -673,6 +682,8 @@ async function fixture(options = {}) {
     setStatus: (value) => (status = value),
     setOutcome: (turnId, value) => (outcomes[turnId] = value),
     setLook: (value) => (look = value),
+    setPress: (value) => (press = value),
+    presses,
     looks,
     checks: () => idleChecks,
     advance: (ms) => (clock += ms),
@@ -1231,6 +1242,7 @@ test('the page check looks at the newest tab of the site, preferring the host No
   );
   assert.deepEqual(checks.get('viking'), {
     signedIn: ['Welcome,'],
+    browserFilled: false,
     loginHosts: ['login.viking.com'],
   });
   assert.equal(checks.size, 1);
@@ -1500,4 +1512,202 @@ test('a site may name other login origins; only clean https origins pass and the
     job: 'signin',
     loginOrigins: ['https://sso.ncl.com'],
   });
+});
+
+test('a browser-filled form is judged by the page after one press, with its own cause codes', () => {
+  const page = {
+    host: 'www.pleasantadvisor.com',
+    passwords: 0,
+    signOut: true,
+    markers: 0,
+    textLength: 900,
+  };
+  assert.equal(filledVerdict(page).confirmed, true);
+  assert.equal(filledVerdict(undefined).cause, 'browser_error');
+  assert.equal(filledVerdict({ ...page, captcha: true }).cause, 'captcha');
+  assert.equal(filledVerdict({ ...page, codeAsked: true }).cause, 'code_asked');
+  assert.equal(
+    filledVerdict({
+      ...page,
+      host: 'identity.pleasantadvisor.com',
+      passwords: 1,
+      signOut: false,
+      loginError: true,
+    }).cause,
+    'wrong_password',
+  );
+  assert.equal(filledVerdict({ ...page, passwords: 1, signOut: false }).cause, 'not_finished');
+  assert.equal(
+    parseSigninChecks(JSON.stringify({ sites: { pleasant: { browserFilled: 'yes' } } })).get(
+      'pleasant',
+    ).browserFilled,
+    false,
+  );
+  assert.doesNotMatch(filledProbe.replaceAll('.value.length', ''), /\.value\b/);
+});
+
+test('the press finds one filled form on the site and clicks its one button, and nothing else', async (t) => {
+  const real = globalThis.fetch;
+  t.after(() => (globalThis.fetch = real));
+  const tabs = [
+    {
+      type: 'page',
+      url: 'https://evil.example.com/',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9223/a',
+    },
+    {
+      type: 'page',
+      url: 'https://identity.pleasantadvisor.com/authenticationendpoint/login.do',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9223/b',
+    },
+  ];
+  globalThis.fetch = async () => new Response(JSON.stringify(tabs));
+  const sent = [];
+  let probe = { ok: true, x: 10, y: 20 };
+  const send = async (address, commands) => {
+    sent.push([address, commands.map(([method, params]) => [method, params?.type ?? null])]);
+    return commands.map(([method]) =>
+      method === 'Runtime.evaluate' ? { result: { value: probe } } : {},
+    );
+  };
+  const hosts = ['pleasantadvisor.com'];
+  assert.deepEqual(await pressFilledForm({ port: 9223, hosts, send }), {
+    pressed: true,
+    host: 'identity.pleasantadvisor.com',
+  });
+  assert.deepEqual(sent, [
+    ['ws://127.0.0.1:9223/b', [['Runtime.evaluate', null]]],
+    [
+      'ws://127.0.0.1:9223/b',
+      [
+        ['Page.bringToFront', null],
+        ['Input.dispatchMouseEvent', 'mouseMoved'],
+        ['Input.dispatchMouseEvent', 'mousePressed'],
+        ['Input.dispatchMouseEvent', 'mouseReleased'],
+      ],
+    ],
+  ]);
+  sent.length = 0;
+  probe = { ok: false, reason: 'the form is not filled' };
+  assert.deepEqual(await pressFilledForm({ port: 9223, hosts, send }), {
+    pressed: false,
+    host: 'identity.pleasantadvisor.com',
+    reason: 'the form is not filled',
+  });
+  assert.equal(sent.length, 1);
+  sent.length = 0;
+  assert.equal((await pressFilledForm({ port: 9223, hosts: ['viking.com'], send })).pressed, false);
+  assert.equal(sent.length, 0);
+});
+
+test('with the switch on, a missing Vault login on a browser-filled form is pressed once and confirmed by the page', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await writeFile(
+    join(f.dataDir, checksFile),
+    JSON.stringify({ sites: { ncl: { browserFilled: true } } }),
+  );
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u1', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN: No saved login was found for the site.',
+  });
+  await f.scan();
+  assert.equal(f.presses.length, 1);
+  assert.deepEqual(f.presses[0].hosts, ['ncl.com']);
+  assert.match(await f.read('log.txt'), / ncl pressing /);
+  await f.scan();
+  assert.equal(f.presses.length, 1);
+  f.advance(21_000);
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.presses.length, 1);
+  assert.equal(f.looks.at(-1).prefer, 'identity.example.com');
+  assert.match(
+    await f.read('log.txt'),
+    / ncl confirmed sign-in outcome read after the browser-filled sign-in\n$/,
+  );
+  const kept = (await f.read('replies/ncl.log.jsonl'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(
+    kept.map((line) => [line.verdict, line.cause, line.signin]),
+    [
+      ['pressing', 'vault_missing', 'none'],
+      ['confirmed', null, 'browser_filled'],
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(kept), /password":|username/i);
+});
+
+test('a browser-filled press that meets an error page stops with its cause and counts toward a pause', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await writeFile(
+    join(f.dataDir, checksFile),
+    JSON.stringify({ sites: { ncl: { browserFilled: true } } }),
+  );
+  f.setLook({
+    host: 'identity.example.com',
+    passwords: 1,
+    signOut: false,
+    markers: 0,
+    textLength: 400,
+    loginError: true,
+  });
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u1', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN: No saved login was found.',
+  });
+  await f.scan();
+  f.advance(21_000);
+  await f.scan();
+  assert.match(
+    await f.read('log.txt'),
+    / ncl unconfirmed sign-in outcome read \(wrong_password\) after the browser-filled sign-in\n$/,
+  );
+  assert.equal(JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8')).strikes.ncl, 1);
+  assert.equal(f.calls.length, 1);
+});
+
+test('without the switch, or when the form is not filled, nothing is pressed', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u1', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN: No saved login was found.',
+  });
+  await f.scan();
+  assert.equal(f.presses.length, 0);
+  assert.match(
+    await f.read('log.txt'),
+    / ncl unconfirmed sign-in outcome read \(vault_missing\)\n$/,
+  );
+  f.advance(11 * 60_000);
+  await writeFile(
+    join(f.dataDir, checksFile),
+    JSON.stringify({ sites: { ncl: { browserFilled: true } } }),
+  );
+  f.setPress({ pressed: false, reason: 'the form is not filled' });
+  await f.drop('b.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setOutcome('u2', {
+    turn: 'succeeded',
+    signin: 'none',
+    reply: 'NOT-SIGNED-IN: No saved login was found.',
+  });
+  await f.scan();
+  assert.equal(f.presses.length, 1);
+  const last = JSON.parse((await f.read('replies/ncl.log.jsonl')).trim().split('\n').at(-1));
+  assert.equal(last.verdict, 'unconfirmed');
+  assert.match(last.reason, /browser form: the form is not filled/);
 });

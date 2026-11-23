@@ -54,6 +54,7 @@ import { trustSystemCertificates } from './system-certificates.mjs';
 import { opensAtLogin, setOpenAtLogin } from './login-item.mjs';
 import {
   cdpPageCheck,
+  cdpPressFilled,
   prepareSigninInbox,
   startSigninInbox,
   writeSigninStatus,
@@ -612,6 +613,7 @@ async function startSigninInboxFromSettings() {
     isIdle: engineIdle,
     outcome: signinOutcome,
     pageCheck: cdpPageCheck(dataDir),
+    pressFilled: cdpPressFilled(dataDir),
     holdKey: async () => (await readFile(join(dataDir, 'autohold-key'), 'utf8')).trim(),
   }).stop;
 }

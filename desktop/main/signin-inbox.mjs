@@ -679,6 +679,7 @@ export function parseSigninChecks(text) {
         : [];
     checks.set(key, {
       signedIn: list(entry.signedIn, checkText),
+      browserFilled: entry.browserFilled === true,
       loginHosts: list(
         Array.isArray(entry.loginHosts)
           ? entry.loginHosts.map((host) => (typeof host === 'string' ? host.toLowerCase() : host))
@@ -785,6 +786,7 @@ export function pageProbe(markers = []) {
   const signOut = /\\b(sign|log)[ -]?(out|off)\\b|logout|signout|logoff/i.test(controls);
   const text = document.body ? document.body.innerText.slice(0, 50000) : '';
   const lower = text.toLowerCase();
+  const frames = [...document.querySelectorAll('iframe')].map((frame) => frame.getAttribute('src') || '').join(' ');
   return {
     host: location.hostname,
     title: document.title.slice(0, 80),
@@ -792,9 +794,43 @@ export function pageProbe(markers = []) {
     signOut,
     markers: markers.filter((marker) => lower.includes(marker)).length,
     textLength: text.trim().length,
+    captcha: /captcha|are you a robot|verify you are human/.test(lower) || /recaptcha|hcaptcha|turnstile/i.test(frames),
+    codeAsked: /verification code|one-time|security code|enter the code|code (?:was )?sent|two-factor|2fa/.test(lower),
+    loginError: /incorrect|invalid (?:user ?name|email|password|credentials)|login failed|authentication failed|not recogni[sz]ed|try again/.test(lower),
   };
 })()`;
 }
+
+export const filledProbe = `(() => {
+  const shown = (element) => element.getClientRects().length > 0;
+  const filled = (element) => {
+    let auto = false;
+    try {
+      auto = element.matches(':autofill');
+    } catch {}
+    try {
+      auto = auto || element.matches(':-webkit-autofill');
+    } catch {}
+    return auto || element.value.length > 0;
+  };
+  const passwords = [...document.querySelectorAll('input[type=password]')].filter(shown);
+  if (passwords.length !== 1) return { ok: false, reason: 'no single visible password field' };
+  const form = passwords[0].form;
+  if (!form) return { ok: false, reason: 'the password field has no form' };
+  const users = [...form.querySelectorAll('input')].filter(
+    (element) => shown(element) && ['text', 'email', 'tel', ''].includes(element.getAttribute('type') || ''),
+  );
+  if (users.length !== 1) return { ok: false, reason: 'no single visible username field' };
+  if (!filled(passwords[0]) || !filled(users[0])) return { ok: false, reason: 'the form is not filled' };
+  const buttons = [...form.querySelectorAll('button,input[type=submit]')].filter(
+    (element) => shown(element) && !element.disabled && (element.tagName !== 'BUTTON' || (element.getAttribute('type') || 'submit') === 'submit'),
+  );
+  if (buttons.length !== 1) return { ok: false, reason: 'no single sign-in button' };
+  buttons[0].scrollIntoView({ block: 'center' });
+  const box = buttons[0].getBoundingClientRect();
+  if (!(box.width > 0 && box.height > 0)) return { ok: false, reason: 'the sign-in button has no size' };
+  return { ok: true, x: box.left + box.width / 2, y: box.top + box.height / 2 };
+})()`;
 
 export function pickTarget(targets, hosts, prefer) {
   const pages = (Array.isArray(targets) ? targets : []).filter((target) => {
@@ -811,22 +847,25 @@ export function pickTarget(targets, hosts, prefer) {
   return pages[0];
 }
 
-function cdpEvaluate(address, expression, timeoutMs) {
+function cdpSend(address, commands, timeoutMs) {
   return new Promise((accept, refuse) => {
     const socket = new WebSocket(address);
+    const results = [];
     const timer = setTimeout(() => {
       socket.close();
       refuse(new Error('the page did not answer in time'));
     }, timeoutMs);
-    socket.addEventListener('open', () =>
-      socket.send(
-        JSON.stringify({
-          id: 1,
-          method: 'Runtime.evaluate',
-          params: { expression, returnByValue: true, timeout: timeoutMs },
-        }),
-      ),
-    );
+    const next = () => {
+      if (results.length === commands.length) {
+        clearTimeout(timer);
+        socket.close();
+        accept(results);
+        return;
+      }
+      const [method, params] = commands[results.length];
+      socket.send(JSON.stringify({ id: results.length + 1, method, params }));
+    };
+    socket.addEventListener('open', next);
     socket.addEventListener('message', (event) => {
       let data;
       try {
@@ -834,12 +873,15 @@ function cdpEvaluate(address, expression, timeoutMs) {
       } catch {
         return;
       }
-      if (data.id !== 1) return;
-      clearTimeout(timer);
-      socket.close();
-      if (data.result?.result?.value && !data.result.exceptionDetails)
-        accept(data.result.result.value);
-      else refuse(new Error('the page could not be read'));
+      if (data.id !== results.length + 1) return;
+      if (data.error) {
+        clearTimeout(timer);
+        socket.close();
+        refuse(new Error('the browser refused a step'));
+        return;
+      }
+      results.push(data.result);
+      next();
     });
     socket.addEventListener('error', () => {
       clearTimeout(timer);
@@ -848,7 +890,18 @@ function cdpEvaluate(address, expression, timeoutMs) {
   });
 }
 
-export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5000 }) {
+async function cdpEvaluate(address, expression, timeoutMs) {
+  const [result] = await cdpSend(
+    address,
+    [['Runtime.evaluate', { expression, returnByValue: true, timeout: timeoutMs }]],
+    timeoutMs,
+  );
+  if (!result?.result?.value || result.exceptionDetails)
+    throw new Error('the page could not be read');
+  return result.result.value;
+}
+
+async function siteTarget(port, hosts, prefer, timeoutMs) {
   if (!/^\d{2,5}$/.test(String(port))) return undefined;
   const response = await fetch(`http://127.0.0.1:${port}/json/list`, {
     signal: AbortSignal.timeout(timeoutMs),
@@ -857,7 +910,60 @@ export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5
   const target = pickTarget(await response.json(), hosts, prefer);
   if (!target) return undefined;
   const address = new URL(target.webSocketDebuggerUrl);
-  if (address.hostname !== '127.0.0.1' && address.hostname !== 'localhost') return undefined;
+  return address.hostname === '127.0.0.1' || address.hostname === 'localhost' ? target : undefined;
+}
+
+export async function pressFilledForm({ port, hosts, prefer, timeoutMs = 5000, send = cdpSend }) {
+  const target = await siteTarget(port, hosts, prefer, timeoutMs);
+  if (!target) return { pressed: false, reason: 'no tab on the site' };
+  const host = new URL(target.url).hostname;
+  const [probe] = await send(
+    target.webSocketDebuggerUrl,
+    [['Runtime.evaluate', { expression: filledProbe, returnByValue: true, timeout: timeoutMs }]],
+    timeoutMs,
+  );
+  const found = probe?.result?.value;
+  if (!found?.ok)
+    return { pressed: false, host, reason: String(found?.reason ?? 'the form could not be read') };
+  const at = { x: Number(found.x), y: Number(found.y), button: 'left', clickCount: 1 };
+  await send(
+    target.webSocketDebuggerUrl,
+    [
+      ['Page.bringToFront', {}],
+      ['Input.dispatchMouseEvent', { type: 'mouseMoved', x: at.x, y: at.y }],
+      ['Input.dispatchMouseEvent', { type: 'mousePressed', ...at }],
+      ['Input.dispatchMouseEvent', { type: 'mouseReleased', ...at }],
+    ],
+    timeoutMs,
+  );
+  return { pressed: true, host };
+}
+
+export function cdpPressFilled(dataDir) {
+  return async ({ hosts, prefer }) => {
+    const port = ((await readSmall(join(dataDir, 'browser-cdp'), 64)) ?? '').trim();
+    return pressFilledForm({ port, hosts, prefer }).catch(() => ({
+      pressed: false,
+      reason: 'the browser could not be reached',
+    }));
+  };
+}
+
+export function filledVerdict(look, check = {}) {
+  const reason = 'the browser had filled the sign-in form; Nod pressed its sign-in button once';
+  if (!look || typeof look !== 'object')
+    return { confirmed: false, cause: 'browser_error', reason };
+  if (look.captcha) return { confirmed: false, cause: 'captcha', reason };
+  if (look.codeAsked) return { confirmed: false, cause: 'code_asked', reason };
+  if (look.passwords > 0 && look.loginError)
+    return { confirmed: false, cause: 'wrong_password', reason };
+  const page = pageVerdict(look, check);
+  return { confirmed: page.ok, cause: page.cause, reason };
+}
+
+export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5000 }) {
+  const target = await siteTarget(port, hosts, prefer, timeoutMs);
+  if (!target) return undefined;
   const look = await cdpEvaluate(target.webSocketDebuggerUrl, pageProbe(markers), timeoutMs);
   return {
     host: String(look.host ?? ''),
@@ -866,6 +972,9 @@ export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5
     signOut: look.signOut === true,
     markers: Number(look.markers) || 0,
     textLength: Number(look.textLength) || 0,
+    captcha: look.captcha === true,
+    codeAsked: look.codeAsked === true,
+    loginError: look.loginError === true,
   };
 }
 
@@ -985,6 +1094,8 @@ export function startSigninInbox(options) {
   const retryMs = options.limits?.retryMs ?? retryDelayMs;
   const origins = options.origins ?? new Map();
   const pageCheck = options.pageCheck;
+  const pressFilled = options.pressFilled;
+  const filledWaitMs = options.limits?.filledWaitMs ?? 20_000;
   const records = join(options.dataDir, recordsFolder);
   const logPath = join(records, 'log.txt');
   const acceptedLogPath = join(records, 'accepted-log.txt');
@@ -1334,7 +1445,7 @@ export function startSigninInbox(options) {
       verdict.confirmed ? 'confirmed' : 'unconfirmed',
       `${key.includes('.') ? 'job' : 'sign-in'} outcome read${
         !key.includes('.') && verdict.cause ? ` (${verdict.cause})` : ''
-      }${entry.retried ? ' after one more try' : ''}`,
+      }${entry.retried ? ' after one more try' : ''}${entry.filled ? ' after the browser-filled sign-in' : ''}`,
     );
     verdictWritten = true;
   }
@@ -1392,6 +1503,34 @@ export function startSigninInbox(options) {
         if (await retry(key, entry)) waiting = true;
         continue;
       }
+      if (entry.checkAt) {
+        if (clock() < entry.checkAt) {
+          waiting = true;
+          continue;
+        }
+        const check = await checksFor(key);
+        const url = sites.get(key);
+        const look = url
+          ? await Promise.resolve()
+              .then(() =>
+                pageCheck?.({
+                  site: key,
+                  hosts: siteHosts(url, origins.get(key) ?? []),
+                  markers: check.signedIn,
+                  prefer: entry.host,
+                }),
+              )
+              .catch(() => undefined)
+          : undefined;
+        await finish(
+          key,
+          entry,
+          { ...filledVerdict(look, check), look },
+          { turn: 'succeeded', signin: 'browser_filled', reply: '' },
+          true,
+        );
+        continue;
+      }
       const { turnId, at, ref } = entry;
       const hold = key.endsWith('.hold');
       let outcome;
@@ -1415,6 +1554,45 @@ export function startSigninInbox(options) {
       if (verdict.confirmed && key.endsWith('.autohold'))
         gate.placed(key.split('.')[0], heldBooking(outcome.reply));
       if (verdict.confirmed && key.endsWith('.release')) gate.placed(ref);
+      if (
+        !key.includes('.') &&
+        !verdict.confirmed &&
+        verdict.cause === 'vault_missing' &&
+        pressFilled &&
+        sites.has(key) &&
+        (await checksFor(key)).browserFilled
+      ) {
+        const pressed = await Promise.resolve()
+          .then(() =>
+            pressFilled({
+              site: key,
+              hosts: siteHosts(sites.get(key), origins.get(key) ?? []),
+              prefer: replyHost(outcome?.reply),
+            }),
+          )
+          .catch(() => undefined);
+        if (pressed?.pressed) {
+          gate.retryLater(key, {
+            at: entry.at,
+            checkAt: clock() + filledWaitMs,
+            filled: true,
+            host: pressed.host,
+            turnId,
+            ...(entry.retried ? { retried: true } : {}),
+          });
+          await gate.save().catch(() => {});
+          await saveReply(key, turnId, outcome, verdict);
+          await keep(key, entry, 'pressing', verdict, outcome);
+          await log(
+            key,
+            'pressing',
+            'the browser had filled the sign-in form; pressed its button once',
+          );
+          waiting = true;
+          continue;
+        }
+        verdict.reason = `${verdict.reason} (browser form: ${String(pressed?.reason ?? 'not pressed').slice(0, 60)})`;
+      }
       if (
         !key.includes('.') &&
         !verdict.confirmed &&
