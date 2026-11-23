@@ -13,7 +13,7 @@ import {
   utimes,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
@@ -53,6 +53,8 @@ import {
   replyCause,
   signinHealth,
   signinVerdict,
+  harnessHolds,
+  harnessLocksPath,
 } from '../main/signin-inbox.mjs';
 
 const allowText = JSON.stringify({
@@ -644,6 +646,7 @@ async function fixture(options = {}) {
     dataDir,
     sites,
     origins: options.origins,
+    harnessLocks: options.harnessLocks,
     limits: { retryMs: 60_000 },
     foreground: options.foreground,
     bringForward: async (request) => {
@@ -694,6 +697,7 @@ async function fixture(options = {}) {
     forwards,
     checks: () => idleChecks,
     advance: (ms) => (clock += ms),
+    now: () => clock,
     drop: (name, content) => writeFile(join(inbox, name), content),
     records: join(dataDir, recordsFolder),
     list: (sub = '') => readdir(join(dataDir, recordsFolder, sub)).catch(() => []),
@@ -1885,4 +1889,135 @@ test('a Chrome error page after the press is a browser error, and a Cloudflare c
     }).cause,
     'captcha',
   );
+});
+
+const harnessLock = (folder, site, fields) =>
+  writeFile(
+    join(folder, `site-${site}.lock`),
+    JSON.stringify({
+      pid: process.pid,
+      host: hostname(),
+      at: 'x',
+      what: 'ensure beta',
+      token: 't',
+      ...fields,
+    }),
+  );
+
+test('the backup tool holds a site only by a live, recent lock, read by its own stale rule', async (t) => {
+  const root = await directory();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const now = Date.now();
+  assert.equal(await harnessHolds(join(root, 'missing'), 'ncl', { now }), false);
+  assert.equal(await harnessHolds(root, 'ncl', { now }), false);
+  await harnessLock(root, 'ncl', { ms: now - 60_000 });
+  assert.equal(await harnessHolds(root, 'ncl', { now }), true);
+  assert.equal(await harnessHolds(root, 'ncl', { now: now + 8 * 60_000 }), false);
+  await harnessLock(root, 'ncl', { ms: now, pid: 2 ** 30 });
+  assert.equal(await harnessHolds(root, 'ncl', { now }), false);
+  await harnessLock(root, 'ncl', { ms: now, pid: 2 ** 30, host: 'another-mac' });
+  assert.equal(await harnessHolds(root, 'ncl', { now }), true);
+  await writeFile(join(root, 'site-ncl.lock'), '{"pid":');
+  const written = (await stat(join(root, 'site-ncl.lock'))).mtimeMs;
+  assert.equal(await harnessHolds(root, 'ncl', { now: written + 5_000 }), true);
+  assert.equal(await harnessHolds(root, 'ncl', { now: written + 11_000 }), false);
+  assert.equal(await harnessHolds(root, '../ncl', { now }), false);
+  assert.equal(
+    harnessLocksPath(undefined, '', '/Users/x'),
+    '/Users/x/.local/share/deepseek-harness/vault/locks',
+  );
+  assert.equal(harnessLocksPath(undefined, '/tmp/l\n', '/Users/x'), '/tmp/l');
+  assert.equal(harnessLocksPath('~/own', '/tmp/l', '/Users/x'), '/Users/x/own');
+});
+
+test('a site the backup tool holds waits without a strike and posts once the lock is gone', async (t) => {
+  const locks = await directory();
+  const f = await fixture({ harnessLocks: locks });
+  t.after(async () => {
+    await f.stop();
+    await rm(locks, { recursive: true, force: true });
+  });
+  await harnessLock(locks, 'ncl', { ms: f.now() });
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.advance(15_000);
+  await f.scan();
+  assert.equal(f.calls.length, 0);
+  assert.ok((await f.inboxList()).includes('a.json'));
+  const log = await f.read('log.txt');
+  assert.equal(
+    log.match(/ ncl waiting the backup sign-in tool holds this site; trying again shortly\n/g)
+      .length,
+    1,
+  );
+  const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.accepted.length, 0);
+  assert.equal(state.strikes.ncl, undefined);
+  await rm(join(locks, 'site-ncl.lock'));
+  f.advance(15_000);
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+});
+
+test('a site the backup tool keeps holding is given up after 15 minutes with the busy reason', async (t) => {
+  const locks = await directory();
+  const f = await fixture({ harnessLocks: locks });
+  t.after(async () => {
+    await f.stop();
+    await rm(locks, { recursive: true, force: true });
+  });
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await harnessLock(locks, 'ncl', { ms: f.now() });
+  await f.scan();
+  for (let i = 0; i < 4; i++) {
+    f.advance(4 * 60_000);
+    await harnessLock(locks, 'ncl', { ms: f.now() });
+    await f.scan();
+  }
+  assert.equal(f.calls.length, 0);
+  assert.ok(!(await f.inboxList()).includes('a.json'));
+  assert.match(
+    await f.read('log.txt'),
+    / ncl rejected nod was busy or waiting for you for 15 minutes\n/,
+  );
+  assert.equal(
+    JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8')).strikes.ncl,
+    undefined,
+  );
+});
+
+test('a stale backup lock, or a lock on another site, never holds a request', async (t) => {
+  const locks = await directory();
+  const f = await fixture({ harnessLocks: locks });
+  t.after(async () => {
+    await f.stop();
+    await rm(locks, { recursive: true, force: true });
+  });
+  await harnessLock(locks, 'ncl', { ms: f.now() - 9 * 60_000 });
+  await harnessLock(locks, 'disney', { ms: f.now() });
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+});
+
+test('a second try waits while the backup tool holds the site', async (t) => {
+  const locks = await directory();
+  const f = await fixture({ harnessLocks: locks });
+  t.after(async () => {
+    await f.stop();
+    await rm(locks, { recursive: true, force: true });
+  });
+  await f.drop('a.json', JSON.stringify({ site: 'ncl' }));
+  await f.scan();
+  f.setLook(undefined);
+  f.setOutcome('u1', { turn: 'succeeded', signin: 'submitted', reply: 'SIGNED-IN' });
+  await f.scan();
+  await harnessLock(locks, 'ncl', { ms: f.now() });
+  f.advance(2 * 60_000);
+  await f.scan();
+  assert.equal(f.calls.length, 1);
+  await rm(join(locks, 'site-ncl.lock'));
+  await f.scan();
+  assert.equal(f.calls.length, 2);
+  assert.equal(JSON.parse(f.calls[1].init.body).retry, true);
 });

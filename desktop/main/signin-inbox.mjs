@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypt
 import { execFile } from 'node:child_process';
 import { constants, watch } from 'node:fs';
 import { link, lstat, mkdir, open, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 
 export const requestBytes = 2048;
@@ -21,6 +21,10 @@ export const stateFile = 'signin-state.json';
 export const checksFile = 'signin-checks.json';
 export const healthFile = 'health.json';
 export const retryDelayMs = 60_000;
+export const harnessLocksFile = 'harness-locks';
+export const harnessLocksDefault = '~/.local/share/deepseek-harness/vault/locks';
+export const harnessLockStaleMs = 8 * 60_000;
+const harnessHalfWrittenMs = 10_000;
 export const signinCauses = [
   'vault_missing',
   'wrong_password',
@@ -60,6 +64,42 @@ export function signinInboxPath(environment, fileText, home = homedir()) {
   const expanded =
     value === '~' ? home : value.startsWith('~/') ? join(home, value.slice(2)) : value;
   return isAbsolute(expanded) ? resolve(expanded) : '';
+}
+
+export function harnessLocksPath(environment, fileText, home = homedir()) {
+  const value = (environment ?? '').trim() || (fileText ?? '').trim() || harnessLocksDefault;
+  return signinInboxPath(value, '', home);
+}
+
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === 'EPERM';
+  }
+}
+
+export async function harnessHolds(folder, site, options = {}) {
+  if (!folder || !siteKey.test(site)) return false;
+  const now = options.now ?? Date.now();
+  const alive = options.alive ?? pidAlive;
+  const path = join(folder, `site-${site}.lock`);
+  const info = await lstat(path).catch(() => undefined);
+  if (!info) return false;
+  if (!info.isFile()) return true;
+  let lock;
+  try {
+    lock = JSON.parse((await readSmall(path, 4096)) ?? '');
+  } catch {
+    lock = undefined;
+  }
+  if (!lock || typeof lock !== 'object')
+    return now - info.mtimeMs <= Math.min(harnessLockStaleMs, harnessHalfWrittenMs);
+  if (now - Number(lock.ms) > harnessLockStaleMs) return false;
+  if (lock.host === (options.host ?? hostname()) && !alive(lock.pid)) return false;
+  return true;
 }
 
 export function signinUrl(value) {
@@ -1139,6 +1179,9 @@ export function startSigninInbox(options) {
   const pageCheck = options.pageCheck;
   const pressFilled = options.pressFilled;
   const filledWaitMs = options.limits?.filledWaitMs ?? 20_000;
+  const harnessLocks = options.harnessLocks ?? '';
+  const harnessHeld = (site) =>
+    harnessHolds(harnessLocks, site, { now: clock() }).catch(() => false);
   const records = join(options.dataDir, recordsFolder);
   const logPath = join(records, 'log.txt');
   const acceptedLogPath = join(records, 'accepted-log.txt');
@@ -1310,7 +1353,7 @@ export function startSigninInbox(options) {
       await reject(name, result.key, decision.reason, identity);
       return 'done';
     }
-    const waiting = async (reason) => {
+    const waiting = async (reason, note = reason.replace(' for 15 minutes', '')) => {
       if (now - seen > deferralMs) {
         noted.delete(identity);
         await reject(name, result.key, reason, identity);
@@ -1319,7 +1362,7 @@ export function startSigninInbox(options) {
       if (!noted.has(identity)) {
         if (noted.size > 1000) noted.clear();
         noted.add(identity);
-        await log(result.key, 'waiting', reason.replace(' for 15 minutes', ''));
+        await log(result.key, 'waiting', note);
       }
       return 'deferred';
     };
@@ -1330,6 +1373,11 @@ export function startSigninInbox(options) {
       )
     )
       return waiting('another job for this site was still running for 15 minutes');
+    if (await harnessHeld(result.site))
+      return waiting(
+        'nod was busy or waiting for you for 15 minutes',
+        'the backup sign-in tool holds this site; trying again shortly',
+      );
     const idle = await Promise.resolve()
       .then(() => isIdle(result.job))
       .catch(() => false);
@@ -1364,8 +1412,8 @@ export function startSigninInbox(options) {
       .catch(() => false);
     let posted;
     let failure = '';
-    let busy = !ready;
-    if (ready)
+    let busy = !ready || (await harnessHeld(result.site));
+    if (!busy)
       try {
         const response = await post(result);
         if (response.status === 409) busy = true;
@@ -1500,7 +1548,8 @@ export function startSigninInbox(options) {
       url &&
       (await Promise.resolve()
         .then(() => isIdle('signin'))
-        .catch(() => false));
+        .catch(() => false)) &&
+      !(await harnessHeld(key));
     let response;
     let forward;
     if (idle && entry.cause === 'form_blank' && !options.foreground && options.bringForward)

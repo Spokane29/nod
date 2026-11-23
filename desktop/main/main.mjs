@@ -58,6 +58,8 @@ import {
   cdpPressFilled,
   prepareSigninInbox,
   startSigninInbox,
+  harnessLocksFile,
+  harnessLocksPath,
   writeSigninStatus,
 } from './signin-inbox.mjs';
 
@@ -628,6 +630,10 @@ async function startSigninInboxFromSettings() {
     foreground,
     bringForward: cdpBringForward(dataDir),
     holdKey: async () => (await readFile(join(dataDir, 'autohold-key'), 'utf8')).trim(),
+    harnessLocks: harnessLocksPath(
+      process.env.NOD_HARNESS_LOCKS,
+      await readFile(join(dataDir, harnessLocksFile), 'utf8').catch(() => ''),
+    ),
   }).stop;
 }
 
