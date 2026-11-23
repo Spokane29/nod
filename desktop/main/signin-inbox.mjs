@@ -1624,7 +1624,10 @@ export function startSigninInbox(options) {
         entry,
         verdict,
         outcome,
-        !(outcome?.turn === 'succeeded' && outcome.signin === 'none'),
+        !(
+          outcome?.signin === 'none' &&
+          (outcome.turn === 'succeeded' || outcome.turn === 'waiting')
+        ),
       );
     }
     return waiting;

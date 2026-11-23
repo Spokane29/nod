@@ -1735,3 +1735,19 @@ test('a turn left waiting for secure input, or one that never answered, still ge
     assert.deepEqual([last.verdict, last.signin], ['confirmed', 'browser_filled']);
   }
 });
+
+test('a turn that waits for private entry typed nothing and never pauses a site', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  for (const round of [1, 2, 3]) {
+    await f.drop(`r${round}.json`, JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    f.setOutcome(`u${round}`, { turn: 'waiting', signin: 'none', reply: '' });
+    await f.scan();
+    f.advance(11 * 60_000);
+  }
+  assert.equal(f.calls.length, 3);
+  const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.blocked.ncl, undefined);
+  assert.equal(state.strikes.ncl, undefined);
+});
