@@ -34,11 +34,18 @@ export const signinCauses = [
   'browser_error',
   'not_finished',
   'no_marker',
+  'no_session',
   'other',
 ];
 const retryCauses = new Set(['form_blank', 'browser_error']);
-const noStrikeCauses = new Set(['form_blank', 'browser_error', 'no_marker', 'captcha']);
-const filledCauses = new Set(['vault_missing', 'not_finished']);
+const noStrikeCauses = new Set([
+  'form_blank',
+  'browser_error',
+  'no_marker',
+  'no_session',
+  'captcha',
+]);
+const filledCauses = new Set(['vault_missing', 'not_finished', 'no_session']);
 const allowBytes = 65_536;
 const stateBytes = 65_536;
 const logBytes = 1_000_000;
@@ -53,7 +60,7 @@ const siteKey = /^[a-z0-9]{2,20}$/;
 const requestName = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.json$/;
 export const recordsFolder = 'signin-records';
 const resumeName = /^([a-z0-9]{2,20})\.signin-resume$/;
-const segment = /^[a-z0-9]{1,24}$|^[a-z0-9]{1,15}-[a-z0-9]{1,15}$/;
+const segment = /^[a-z0-9]{1,24}$|^[a-z0-9]{1,15}(?:-[a-z0-9]{1,15}){1,2}$/;
 const label = /^[a-z0-9]{1,30}$|^[a-z0-9]{1,15}-[a-z0-9]{1,15}$/;
 const suffix = /^[a-z]{2,24}$/;
 const localSuffix = new Set(['localhost', 'local', 'internal', 'lan', 'home', 'arpa', 'test']);
@@ -703,6 +710,7 @@ const loginLabels = new Set([
 ]);
 const checkText = /^[^\n\r]{2,60}$/;
 const hostShape = /^[a-z0-9.-]{3,100}$/;
+const cookieName = /^[A-Za-z0-9_.-]{1,64}$/;
 
 export function parseSigninChecks(text) {
   const checks = new Map();
@@ -722,6 +730,9 @@ export function parseSigninChecks(text) {
     checks.set(key, {
       signedIn: list(entry.signedIn, checkText),
       browserFilled: entry.browserFilled === true,
+      ...(typeof entry.sessionCookie === 'string' && cookieName.test(entry.sessionCookie)
+        ? { sessionCookie: entry.sessionCookie }
+        : {}),
       loginHosts: list(
         Array.isArray(entry.loginHosts)
           ? entry.loginHosts.map((host) => (typeof host === 'string' ? host.toLowerCase() : host))
@@ -745,6 +756,7 @@ export function pageVerdict(look, check = {}) {
     return { ok: false, cause: 'not_finished' };
   if (!(look.textLength >= 40)) return { ok: false, cause: 'form_blank' };
   if (!look.signOut && !(look.markers > 0)) return { ok: false, cause: 'no_marker' };
+  if (check.sessionCookie && look.session !== true) return { ok: false, cause: 'no_session' };
   return { ok: true, cause: null };
 }
 
@@ -782,7 +794,12 @@ export function replyCause(reply) {
     return 'form_blank';
   if (/connection error|couldn.t read|could not read|couldn.t verify|could not verify/.test(t))
     return 'browser_error';
-  if (/didn.t finish|did not finish/.test(t)) return 'not_finished';
+  if (
+    /didn.t finish|did not finish|not (?:sent|submitted)|didn.t (?:send|submit)|did not (?:send|submit)/.test(
+      t,
+    )
+  )
+    return 'not_finished';
   return 'other';
 }
 
@@ -1044,11 +1061,22 @@ export function filledVerdict(look, check = {}) {
   };
 }
 
-export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5000 }) {
+export async function sessionPresent(address, url, name, timeoutMs, send = cdpSend) {
+  const [result] = await send(address, [['Network.getCookies', { urls: [url] }]], timeoutMs);
+  return (result?.cookies ?? []).some((cookie) => cookie?.name === name);
+}
+
+export async function readSitePage({ port, hosts, markers, prefer, cookie, timeoutMs = 5000 }) {
   const target = await siteTarget(port, hosts, prefer, timeoutMs);
   if (!target) return undefined;
   const look = await cdpEvaluate(target.webSocketDebuggerUrl, pageProbe(markers), timeoutMs);
+  const session = cookie
+    ? await sessionPresent(target.webSocketDebuggerUrl, target.url, cookie, timeoutMs).catch(
+        () => false,
+      )
+    : undefined;
   return {
+    ...(cookie ? { session } : {}),
     host: String(look.host ?? ''),
     title: String(look.title ?? ''),
     passwords: Number(look.passwords) || 0,
@@ -1062,9 +1090,9 @@ export async function readSitePage({ port, hosts, markers, prefer, timeoutMs = 5
 }
 
 export function cdpPageCheck(dataDir) {
-  return async ({ hosts, markers, prefer }) => {
+  return async ({ hosts, markers, prefer, cookie }) => {
     const port = ((await readSmall(join(dataDir, 'browser-cdp'), 64)) ?? '').trim();
-    return readSitePage({ port, hosts, markers, prefer }).catch(() => undefined);
+    return readSitePage({ port, hosts, markers, prefer, cookie }).catch(() => undefined);
   };
 }
 
@@ -1517,6 +1545,7 @@ export function startSigninInbox(options) {
                 site: key,
                 hosts: siteHosts(url, origins.get(key) ?? []),
                 markers: check.signedIn,
+                ...(check.sessionCookie ? { cookie: check.sessionCookie } : {}),
                 prefer: replyHost(outcome.reply),
               }),
             )
@@ -1628,6 +1657,7 @@ export function startSigninInbox(options) {
                   site: key,
                   hosts: siteHosts(url, origins.get(key) ?? []),
                   markers: check.signedIn,
+                  ...(check.sessionCookie ? { cookie: check.sessionCookie } : {}),
                   prefer: entry.host,
                 }),
               )
@@ -1789,6 +1819,7 @@ export function startSigninInbox(options) {
               passwords: look.passwords,
               signOut: look.signOut,
               markers: look.markers,
+              ...(typeof look.session === 'boolean' ? { session: look.session } : {}),
             },
           }
         : {}),

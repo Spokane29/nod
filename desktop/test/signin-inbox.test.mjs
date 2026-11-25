@@ -51,6 +51,7 @@ import {
   parseSigninChecks,
   pickTarget,
   replyCause,
+  sessionPresent,
   signinHealth,
   signinVerdict,
   harnessHolds,
@@ -92,7 +93,8 @@ test('only plain https start urls are accepted for the allow-list', () => {
     'https://xn--80ak6aa92e.com/',
     'https://127.0.0.1/login',
     'https://10.0.0.1/x',
-    'https://secure.cruisingpower.com/log-in-now',
+    'https://secure.cruisingpower.com/log-in-right-now',
+    'https://secure.cruisingpower.com/travel-agent-login-then-email-bob',
     'https://nod.localhost/',
     'https://printer.local/',
     'https://files.internal/login',
@@ -106,6 +108,8 @@ test('only plain https start urls are accepted for the allow-list', () => {
     'https://www.disneytravelagents.com/',
     'https://my-portal.example.co.uk/login',
     'https://www.viking.com/travel-advisor',
+    'https://disneycruise.disney.go.com/travel-agent-login/',
+    'https://secure.cruisingpower.com/log-in-now',
   ])
     assert.equal(signinUrl(good), good);
 });
@@ -1205,6 +1209,49 @@ test('a sign-in is confirmed only by the exact line and a signed-in page', () =>
   };
   assert.equal(signinVerdict(freeForm, signedPage).confirmed, false);
   assert.equal(pageVerdict(signedPage).ok, true);
+});
+
+test('a site with a session cookie is confirmed only while that cookie is present', async () => {
+  const check = parseSigninChecks(
+    JSON.stringify({ sites: { disneycruise: { sessionCookie: 'Travel-Agent-Authorization' } } }),
+  ).get('disneycruise');
+  assert.equal(check.sessionCookie, 'Travel-Agent-Authorization');
+  assert.equal(
+    parseSigninChecks(JSON.stringify({ sites: { x1: { sessionCookie: 'a b;c' } } })).get('x1')
+      .sessionCookie,
+    undefined,
+  );
+  const staleHome = {
+    host: 'disneycruise.disney.go.com',
+    title: 'Disney Cruise Line',
+    passwords: 0,
+    signOut: true,
+    markers: 0,
+    textLength: 5000,
+  };
+  const said = { turn: 'succeeded', signin: 'none', reply: 'Signed in.\nSIGNED-IN' };
+  assert.equal(pageVerdict(staleHome).ok, true);
+  assert.deepEqual(pageVerdict(staleHome, check), { ok: false, cause: 'no_session' });
+  assert.deepEqual(pageVerdict({ ...staleHome, session: false }, check), {
+    ok: false,
+    cause: 'no_session',
+  });
+  assert.equal(signinVerdict(said, staleHome, check).cause, 'no_session');
+  assert.equal(signinVerdict(said, { ...staleHome, session: true }, check).confirmed, true);
+  assert.equal(
+    pageVerdict({ ...staleHome, session: true, passwords: 1 }, check).cause,
+    'not_finished',
+  );
+  const sent = [];
+  const send = async (address, commands) => {
+    sent.push(commands);
+    return [{ cookies: [{ name: 'other' }, { name: 'Travel-Agent-Authorization' }] }];
+  };
+  const url = 'https://disneycruise.disney.go.com/cruises-destinations/list/';
+  assert.equal(await sessionPresent('ws://x', url, 'Travel-Agent-Authorization', 1000, send), true);
+  assert.equal(await sessionPresent('ws://x', url, 'Missing', 1000, send), false);
+  assert.deepEqual(sent[0], [['Network.getCookies', { urls: [url] }]]);
+  assert.equal(replyCause('NOT-SIGNED-IN the filled form was not sent'), 'not_finished');
 });
 
 test('each failure gets one fixed cause, and the stored reason holds no long numbers', () => {
