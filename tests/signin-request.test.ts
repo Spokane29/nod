@@ -25,7 +25,11 @@ test('only plain https start urls are accepted', () => {
     signinUrl('https://www.viking.com/travel-advisor'),
     'https://www.viking.com/travel-advisor',
   );
-  assert.equal(signinUrl('https://www.viking.com/log-in-now'), undefined);
+  assert.equal(
+    signinUrl('https://disneycruise.disney.go.com/travel-agent-login/'),
+    'https://disneycruise.disney.go.com/travel-agent-login/',
+  );
+  assert.equal(signinUrl('https://www.viking.com/log-in-right-now'), undefined);
   for (const bad of [
     'http://secure.cruisingpower.com/',
     'https://user:pw@secure.cruisingpower.com/',
