@@ -1678,6 +1678,13 @@ test('a site may name other login origins; only clean https origins pass and the
   });
 });
 
+test('Disney cruise search always requires the Vault and radio selection before Login', () => {
+  const checks = parseSigninChecks(
+    JSON.stringify({ sites: { disneycruise: { browserFilled: true } } }),
+  );
+  assert.equal(checks.get('disneycruise').browserFilled, false);
+});
+
 test('a browser-filled form is judged by the page after one press, with its own cause codes', () => {
   const page = {
     host: 'www.pleasantadvisor.com',

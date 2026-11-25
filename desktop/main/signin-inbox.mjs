@@ -729,7 +729,7 @@ export function parseSigninChecks(text) {
         : [];
     checks.set(key, {
       signedIn: list(entry.signedIn, checkText),
-      browserFilled: entry.browserFilled === true,
+      browserFilled: key !== 'disneycruise' && entry.browserFilled === true,
       ...(typeof entry.sessionCookie === 'string' && cookieName.test(entry.sessionCookie)
         ? { sessionCookie: entry.sessionCookie }
         : {}),
