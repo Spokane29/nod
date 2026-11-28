@@ -35,15 +35,19 @@ export const signinCauses = [
   'not_finished',
   'no_marker',
   'no_session',
+  'model_limit',
+  'model_error',
   'other',
 ];
-const retryCauses = new Set(['form_blank', 'browser_error']);
+const modelCauses = new Set(['model_limit', 'model_error']);
+const retryCauses = new Set(['form_blank', 'browser_error', ...modelCauses]);
 const noStrikeCauses = new Set([
   'form_blank',
   'browser_error',
   'no_marker',
   'no_session',
   'captcha',
+  ...modelCauses,
 ]);
 const filledCauses = new Set(['vault_missing', 'not_finished', 'no_session']);
 const allowBytes = 65_536;
@@ -818,10 +822,29 @@ export function shortReason(reply) {
     .slice(0, 160);
 }
 
+export function modelFailureVerdict(failure) {
+  if (!modelCauses.has(failure?.kind)) return undefined;
+  const provider = /^[a-z0-9.-]{1,40}$/.test(String(failure.provider ?? ''))
+    ? failure.provider
+    : 'model provider';
+  return {
+    confirmed: false,
+    cause: failure.kind,
+    reason:
+      failure.kind === 'model_limit'
+        ? `model usage limit reached (${provider})`
+        : `model request failed (${provider})`,
+  };
+}
+
 export function signinVerdict(outcome, look, check = {}) {
   const reason = shortReason(outcome?.reply);
   if (!outcome || !finished.has(outcome.turn))
     return { confirmed: false, cause: 'not_finished', reason };
+  if (outcome.turn === 'failed') {
+    const model = modelFailureVerdict(outcome.failure);
+    if (model) return model;
+  }
   if (outcome.turn !== 'succeeded') {
     const cause = replyCause(outcome.reply);
     return { confirmed: false, cause: cause === 'other' ? 'not_finished' : cause, reason };
@@ -1785,6 +1808,7 @@ export function startSigninInbox(options) {
             turnId,
             confirmed: verdict.confirmed,
             ...(key.includes('.') ? {} : { cause: verdict.cause }),
+            ...(verdict.reason ? { reason: verdict.reason } : {}),
             turn: outcome?.turn ?? null,
             signin: outcome?.signin ?? null,
             readAt: pacificStamp(new Date(clock())).text,

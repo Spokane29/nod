@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import type { FastifyInstance } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import { z } from 'zod';
+import { turnModelFailure } from '../shared/model-quota.ts';
 import { waitingTurnSql } from './turn-chain.ts';
 import { linkLoginOrigins } from './vault.ts';
 import type { SubmitUserMessageResult } from './thread.ts';
@@ -277,8 +278,8 @@ export function registerSigninRequests(
   });
   app.get<{ Params: { id: string } }>('/api/desktop/signin/:id', async (request, reply) => {
     const id = z.uuid().parse(request.params.id);
-    const turn = await pool.query<{ status: string }>(
-      'SELECT status FROM turns WHERE id=$1 AND owner_id=$2 AND starts_with(source_id,$3)',
+    const turn = await pool.query<{ status: string; error?: string | null }>(
+      'SELECT status,error FROM turns WHERE id=$1 AND owner_id=$2 AND starts_with(source_id,$3)',
       [id, ownerId, signinSourcePrefix],
     );
     if (!turn.rows[0]) return reply.code(404).send({ error: 'Not found.' });
@@ -307,7 +308,10 @@ export function registerSigninRequests(
       [ownerId, id],
     );
     const statuses = uses.rows.map((row) => row.status);
+    const failure =
+      turn.rows[0].status === 'failed' ? turnModelFailure(turn.rows[0].error) : undefined;
     return {
+      ...(failure ? { failure } : {}),
       turn: combinedStatus(turn.rows[0].status, tasks.rows),
       tasks: tasks.rows.length,
       reply: (lastReply.rows[0]?.text ?? '').slice(0, 4000),

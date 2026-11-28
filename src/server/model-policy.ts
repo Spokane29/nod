@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
+import { modelUsageLimit } from '../shared/model-quota.ts';
 import type { ModelEffort, ModelSelection } from '../shared/models.ts';
 
 export const policyLanes = [
@@ -17,6 +18,13 @@ interface PolicyRow {
   status: string;
   models: Array<{ choice: { id: string; efforts: ModelEffort[]; audio?: unknown } }>;
   retry?: Record<string, number>;
+  issues?: Record<string, { reason: string }>;
+}
+
+export function usageLimited(row: PolicyRow, now = Date.now()) {
+  return Object.entries(row.retry ?? {}).some(
+    ([id, until]) => until > now && modelUsageLimit(row.issues?.[id]?.reason),
+  );
 }
 
 const efforts: readonly ModelEffort[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -56,7 +64,7 @@ export function policyChoice(
   for (const item of list) {
     const [modelId, wanted] = item.split('@') as [string, ModelEffort | undefined];
     for (const row of rows) {
-      if (row.status !== 'connected') continue;
+      if (row.status !== 'connected' || usageLimited(row, now)) continue;
       const model = row.models.find((candidate) => candidate.choice.id === modelId);
       if (!model || model.choice.audio || (row.retry?.[modelId] ?? 0) > now) continue;
       const effort =

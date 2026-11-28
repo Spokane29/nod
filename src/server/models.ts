@@ -52,7 +52,7 @@ import { analyticsModel, snapshotAnalytics, type CaptureAnalytics } from './anal
 import type { SettingActor } from './analytics-settings.ts';
 import { logFailure } from './failure-log.ts';
 import { loadModelPolicy, policyChoice } from './model-policy.ts';
-import { modelFailureReason } from '../shared/model-quota.ts';
+import { modelFailureReason, modelUsageLimit } from '../shared/model-quota.ts';
 import { createTextRedactor, redactSecretText } from './redaction.ts';
 import { afterCommit } from './transaction.ts';
 
@@ -297,6 +297,7 @@ const credentialTag = (value: ModelCredential | undefined) =>
   createHash('sha256')
     .update(JSON.stringify(value.type === 'oauth' ? [value.accountId, value.clientId] : value))
     .digest('hex');
+const usageLimitWindow = 30 * 60_000;
 const failureWindow = (failures: number) =>
   Math.min(120_000 * 3 ** Math.max(0, failures - 1), 6 * 3_600_000);
 function failures(row: Pick<ModelRecord, 'requestFailures'> | undefined, tag: string | undefined) {
@@ -531,15 +532,20 @@ export function createModelService(options: {
                   ? previous.failures
                   : (previous?.failures ?? 0) + 1;
               saved.requestFailures = Object.fromEntries(current);
+              const reason = redactSecretText(modelFailureReason(error))
+                .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
+                .replace(/\s+/g, ' ')
+                .trim()
+                .slice(0, 300);
               saved.requestFailures[modelId] = {
                 credentialTag: tag,
                 failures: count,
-                retryAt: Date.now() + failureWindow(count),
-                reason: redactSecretText(modelFailureReason(error))
-                  .replace(/\s*\[request phase: [^\]]*\]\s*$/, '')
-                  .replace(/\s+/g, ' ')
-                  .trim()
-                  .slice(0, 300),
+                retryAt:
+                  Date.now() +
+                  (modelUsageLimit(reason)
+                    ? Math.max(failureWindow(count), usageLimitWindow)
+                    : failureWindow(count)),
+                reason,
               };
             });
             await reload();

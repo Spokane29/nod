@@ -1,3 +1,21 @@
+export function modelUsageLimit(text: string | undefined) {
+  return /\b(?:usage limit|rate limit|rate_limit\w*|quota|insufficient_quota|RESOURCE_EXHAUSTED|too many requests|429|credits are depleted)\b/i.test(
+    text ?? '',
+  );
+}
+
+export function turnModelFailure(error: string | null | undefined) {
+  const text = error ?? '';
+  const provider =
+    /^The model request failed: ([A-Za-z0-9 .-]{1,40}) \/ /.exec(text)?.[1] ??
+    /^([A-Za-z0-9 .-]{1,40}) failed the last request to \S+ \(/.exec(text)?.[1];
+  if (!provider) return undefined;
+  return {
+    kind: modelUsageLimit(text) ? ('model_limit' as const) : ('model_error' as const),
+    provider: provider.trim().toLowerCase().replace(/\s+/g, '-'),
+  };
+}
+
 export function modelQuotaFailure(text: string) {
   const normalized = text.replace(/["']/g, '').replace(/\\n/g, ' ');
   if (/\bprepayment credits are depleted\b/i.test(normalized))

@@ -1443,6 +1443,56 @@ test('a blank page is tried once more after a minute, outside the limits, and ne
   );
 });
 
+test('a model usage limit is tried once more on the backup model, says why, and never pauses a site', async (t) => {
+  const f = await fixture();
+  t.after(f.stop);
+  let turn = 0;
+  for (const round of [1, 2, 3]) {
+    await f.drop(`m${round}.json`, JSON.stringify({ site: 'ncl' }));
+    await f.scan();
+    for (const attempt of [1, 2]) {
+      turn++;
+      f.setOutcome(`u${turn}`, {
+        turn: 'failed',
+        signin: 'none',
+        reply: '',
+        failure: { kind: 'model_limit', provider: 'openai' },
+      });
+      await f.scan();
+      if (attempt === 1) {
+        assert.match(await f.read('log.txt'), / ncl retrying sign-in outcome read \(model_limit\)/);
+        f.advance(61_000);
+        await f.scan();
+      }
+    }
+    f.advance(11 * 60_000);
+  }
+  assert.equal(f.calls.length, 6);
+  const state = JSON.parse(await readFile(join(f.dataDir, stateFile), 'utf8'));
+  assert.equal(state.blocked.ncl, undefined);
+  assert.equal(state.strikes.ncl, undefined);
+  const kept = (await f.read('replies/ncl.log.jsonl'))
+    .trim()
+    .split('\n')
+    .map((line) => JSON.parse(line));
+  assert.deepEqual(kept.at(-1).cause, 'model_limit');
+  assert.equal(kept.at(-1).reason, 'model usage limit reached (openai)');
+  assert.equal(
+    JSON.parse(await f.read('replies/ncl.json')).reason,
+    'model usage limit reached (openai)',
+  );
+  assert.equal(
+    signinVerdict({ turn: 'failed', reply: '', failure: { kind: 'model_error', provider: 'x y' } })
+      .reason,
+    'model request failed (model provider)',
+  );
+  assert.notEqual(
+    signinVerdict({ turn: 'succeeded', reply: 'SIGNED-IN', failure: { kind: 'model_limit' } })
+      .cause,
+    'model_limit',
+  );
+});
+
 test('in background mode a blank page brings the site tab forward for the one retry only', async (t) => {
   for (const [foreground, reply, expected] of [
     [false, 'NOT-SIGNED-IN the page stayed blank', 1],

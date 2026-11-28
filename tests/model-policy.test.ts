@@ -44,6 +44,36 @@ test('a paused model or a lost connection moves to the next model, ending at the
   assert.equal(policyChoice(policy, 'portal', [down], 1), undefined);
 });
 
+test('a usage limit on one model skips every model of that connection, until its pause ends', () => {
+  const fallback = parseModelPolicy(
+    JSON.stringify({
+      portal: ['gpt-6.1-terra@medium'],
+      fallback: ['gpt-6.1-sol@high', 'gpt-6.1-terra@medium', 'ornith-1.5-35b-a3b'],
+    }),
+  );
+  const limited = {
+    ...openai,
+    retry: { 'gpt-6.1-terra': 10 },
+    issues: {
+      'gpt-6.1-terra': {
+        reason:
+          'The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead. (HTTP 200)',
+      },
+    },
+  };
+  assert.equal(
+    policyChoice(fallback, 'portal', [limited, local], 5)?.modelId,
+    'ornith-1.5-35b-a3b',
+  );
+  assert.equal(policyChoice(fallback, 'fallback', [limited, local], 5)?.connectionId, 'local');
+  assert.equal(policyChoice(fallback, 'portal', [limited, local], 20)?.modelId, 'gpt-6.1-terra');
+  const timeout = {
+    ...limited,
+    issues: { 'gpt-6.1-terra': { reason: 'The request timed out. (HTTP 504)' } },
+  };
+  assert.equal(policyChoice(fallback, 'portal', [timeout, local], 5)?.modelId, 'gpt-6.1-sol');
+});
+
 test('a malformed policy is refused, never half-read', () => {
   for (const bad of ['[]', '{"chat":"gpt"}', '{"chats":["gpt"]}', '{"chat":["gpt; rm -rf"]}'])
     assert.throws(() => parseModelPolicy(bad));

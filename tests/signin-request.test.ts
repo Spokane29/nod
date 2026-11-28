@@ -350,6 +350,26 @@ test('the outcome route reports the turn and the sign-in state', async () => {
     const response = await app.inject({ method: 'GET', url: `/api/desktop/signin/${id}` });
     assert.deepEqual(response.json(), { turn: expected, tasks: 1, reply: '', signin: 'submitted' });
   }
+  for (const [error, failure] of [
+    [
+      'The model request failed: openai / gpt-6.1-terra: The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead. (HTTP 200)',
+      { kind: 'model_limit', provider: 'openai' },
+    ],
+    [
+      'OpenAI failed the last request to gpt-6-luna (HTTP 429). Automatic requests to this model are paused until a request succeeds.',
+      { kind: 'model_limit', provider: 'openai' },
+    ],
+    [
+      'The model request failed: lmstudio / ornith-1.5-35b-a3b: connection refused',
+      { kind: 'model_error', provider: 'lmstudio' },
+    ],
+    ['The turn was stopped.', undefined],
+  ] as const) {
+    const { app } = await application({ rows: { turn: [{ status: 'failed', error }] } });
+    const body = (await app.inject({ method: 'GET', url: `/api/desktop/signin/${id}` })).json();
+    assert.deepEqual(body.failure, failure);
+    assert.equal(JSON.stringify(body).includes('ChatGPT'), false);
+  }
   const { app } = await application();
   assert.equal(
     (await app.inject({ method: 'GET', url: `/api/desktop/signin/${id}` })).statusCode,
